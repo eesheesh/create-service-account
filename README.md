@@ -24,7 +24,7 @@ These scripts are designed to automate the steps needed to create a service acco
 * Authorizes the service account
 * Creates and downloads a service account key
 
-# Table of contents
+## Table of contents
 
 * [Getting Started](#getting-started)
 * [Usage](#usage)
