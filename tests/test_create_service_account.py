@@ -171,5 +171,17 @@ class TestCreateServiceAccount(unittest.TestCase):
         self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer", call_args[1]['body'])
         self.assertIn("assertion=signed_jwt_content", call_args[1]['body'])
 
+    def test_is_service_disabled(self):
+        # Test disabled scenarios
+        self.assertTrue(create_service_account.is_service_disabled('{"error": {"errors": [{"reason": "notACalendarUser"}]}}'))
+        self.assertTrue(create_service_account.is_service_disabled('{"error": {"errors": [{"reason": "notFound"}]}}'))
+        self.assertTrue(create_service_account.is_service_disabled('{"error": {"errors": [{"reason": "authError"}]}}'))
+        self.assertTrue(create_service_account.is_service_disabled('{"error": {"message": "service not enabled"}}'))
+
+        # Test enabled scenarios
+        self.assertFalse(create_service_account.is_service_disabled('{"error": {"errors": [{"reason": "otherError"}]}}'))
+        self.assertFalse(create_service_account.is_service_disabled('{}'))
+        self.assertTrue(create_service_account.is_service_disabled(None))
+
 if __name__ == '__main__':
     unittest.main()

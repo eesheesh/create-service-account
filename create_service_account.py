@@ -699,8 +699,7 @@ def is_service_disabled(raw_api_response):
     try:
         api_response = json.loads(raw_api_response)
         error_reason = api_response["error"]["errors"][0]["reason"]
-        # pylint: disable=condition-evals-to-constant
-        if "notACalendarUser" or "notFound" or "authError" in error_reason:
+        if error_reason in ["notACalendarUser", "notFound", "authError"]:
             return True
     except BaseException:  # pylint: disable=broad-exception-caught
         pass
