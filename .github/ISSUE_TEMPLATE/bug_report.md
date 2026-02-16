@@ -26,7 +26,7 @@ Attach the log file that is generated after running a script. The log file can b
 **Screenshots**
 If applicable, add screenshots to help explain your problem.
 
-## If you are blocked by this issue, please follow the manual steps for creating a service account.
+## If you are blocked by this issue, please follow the manual steps for creating a service account
 
 ### Select which product you are trying to create a service account for to see the manual steps
 * [Google Workspace Migration for Microsoft Exchange (GWMME)](https://support.google.com/a/answer/6291304?hl=en#zippy=%2Coption-manually-create-a-service-account)
