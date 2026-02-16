@@ -671,8 +671,8 @@ def get_access_token_for_scopes(subject, scopes):
                     "Failed to exchange JWT for token: %s",
                     content.decode())
                 raise RuntimeError(
-                    f"Failed to exchange JWT for token: {
-                        content.decode()}")
+                    "Failed to exchange JWT for token: "
+                    f"{content.decode()}")
 
             token_response = json.loads(content)
             logging.debug("Successfully obtained access token via signed JWT")
