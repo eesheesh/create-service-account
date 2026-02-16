@@ -857,7 +857,14 @@ async def main():
         await delete_key()
 
     logging.info("Done! \u2705")
-    if not args.no_key:
+    if args.no_key:
+        service_account_email = await get_service_account_email()
+        print(
+            "\nThe service account is correctly authorized. Note the service "
+            "account email address, which you can use in "
+            f"{TOOL_NAME_FRIENDLY}: \033[1m{service_account_email}\033[0m")
+        print("\nYou can now close this page.")
+    else:
         print(
             "\nIf you have already downloaded the file, then you may close this "
             "page. Please remember that this file is highly sensitve. Any person "
