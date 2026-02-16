@@ -590,8 +590,8 @@ def get_access_token_for_scopes(subject, scopes):
             ["gcloud", "config", "get-value", "project"],
             stderr=subprocess.PIPE
         ).decode().strip()
-        service_account_email = f"{
-            TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com"
+        service_account_email = (
+            f"{TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com")
 
         now = int(time.time())
         expiry = now + 3600
