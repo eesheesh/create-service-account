@@ -604,8 +604,7 @@ async def get_access_token_via_gcloud(subject, scopes):
 
     # Create a temporary file for the payload
     payload_file = f"jwt_payload_{now}.json"
-    # pylint: disable=unspecified-encoding
-    with open(payload_file, "w") as f:
+    with open(payload_file, "w", encoding='utf-8') as f:
         json.dump(payload, f)
 
     jwt_output_file = f"jwt_signed_{now}.jwt"
