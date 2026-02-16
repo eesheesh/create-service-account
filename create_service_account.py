@@ -1,0 +1,776 @@
+#!/usr/bin/python3
+# Copyright 2020 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""GCP Cloud Shell script to automate creation of a service account.
+
+This script streamlines the installation of tools by automating the steps
+required for obtaining a service account key. Specifically, this script will:
+
+1. Create a GCP project
+2. Enable APIs
+3. Verify that the org policies allow creating service account keys
+4. Create a service account
+5. Authorize the service account
+6. Create and download a service account key
+"""
+
+import argparse
+import asyncio
+import datetime
+import json
+import logging
+import os
+import pathlib
+import sys
+import time
+import urllib.parse
+
+from google_auth_httplib2 import Request
+from httplib2 import Http
+
+from google.auth.exceptions import RefreshError
+from google.oauth2 import service_account
+
+VERSION = "3"
+
+# Tool configurations
+TOOL_CONFIGS = {
+    "gwmme": {
+        "TOOL_NAME": "GWMME",
+        "TOOL_NAME_FRIENDLY": "Google Workspace Migration for Microsoft Exchange",
+        "TOOL_HELP_CENTER_URL": "https://support.google.com/a/answer/6291304",
+        "APIS": [
+            "admin.googleapis.com",
+            "calendar-json.googleapis.com",
+            "contacts.googleapis.com",
+            "gmail.googleapis.com",
+            "groupsmigration.googleapis.com",
+            "orgpolicy.googleapis.com"
+        ],
+        "SCOPES": [
+            "https://www.googleapis.com/auth/contacts",
+            "https://www.googleapis.com/auth/admin.directory.group.readonly",
+            "https://www.googleapis.com/auth/admin.directory.user",
+            "https://www.googleapis.com/auth/apps.groups.migration",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/gmail.insert",
+            "https://www.googleapis.com/auth/gmail.labels"
+        ]
+    },
+    "gwm": {
+        "TOOL_NAME": "GWM",
+        "TOOL_NAME_FRIENDLY": "Google Workspace Migrate",
+        "TOOL_HELP_CENTER_URL": "https://support.google.com/workspacemigrate/answer/10839762",
+        "APIS": [
+            "admin.googleapis.com",
+            "contacts.googleapis.com",
+            "migrate.googleapis.com",
+            "gmail.googleapis.com",
+            "calendar-json.googleapis.com",
+            "drive.googleapis.com",
+            "groupsmigration.googleapis.com",
+            "groupssettings.googleapis.com",
+            "people.googleapis.com",
+            "sheets.googleapis.com",
+            "tasks.googleapis.com",
+            "orgpolicy.googleapis.com"
+        ],
+        "SCOPES": [
+            "https://www.googleapis.com/auth/contacts",
+            "https://www.googleapis.com/auth/admin.directory.group",
+            "https://www.googleapis.com/auth/admin.directory.group.member",
+            "https://www.googleapis.com/auth/admin.directory.orgunit",
+            "https://www.googleapis.com/auth/admin.directory.resource.calendar",
+            "https://www.googleapis.com/auth/admin.directory.user",
+            "https://www.googleapis.com/auth/apps.groups.migration",
+            "https://www.googleapis.com/auth/apps.groups.settings",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.appdata",
+            "https://www.googleapis.com/auth/drive.file",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/migrate.deployment.interop",
+            "https://www.googleapis.com/auth/tasks",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://sites.google.com/feeds",
+            "https://www.googleapis.com/auth/gmail.settings.basic",
+            "https://www.googleapis.com/auth/gmail.settings.sharing",
+            "https://www.googleapis.com/auth/admin.directory.customer.readonly",
+            "https://www.googleapis.com/auth/admin.directory.rolemanagement.readonly"
+        ]
+    },
+    "password_sync": {
+        "TOOL_NAME": "PasswordSync",
+        "TOOL_NAME_FRIENDLY": "Password Sync",
+        "TOOL_HELP_CENTER_URL": "https://support.google.com/a/answer/7378726",
+        "APIS": [
+            "admin.googleapis.com",
+            "orgpolicy.googleapis.com"
+        ],
+        "SCOPES": ["https://www.googleapis.com/auth/admin.directory.user"]
+    }
+}
+
+# Default values, will be overridden by arguments
+TOOL_NAME = ""
+TOOL_NAME_FRIENDLY = ""
+TOOL_HELP_CENTER_URL = ""
+APIS = []
+SCOPES = []
+
+DWD_URL_FORMAT = (
+    "https://admin.google.com/ac/owl/domainwidedelegation?"
+    "overwriteClientId=true&clientIdToAdd={}&clientScopeToAdd={}")
+USER_AGENT = ""
+KEY_FILE = ""
+
+# GWM specific constants
+OAUTH_CONSENT_SCREEN_URL_FORMAT = (
+    "https://console.cloud.google.com/apis/credentials/consent?project={}")
+CREATE_OAUTH_WEB_CLIENT_ID_URL = (
+    "https://support.google.com/workspacemigrate/answer/9222992")
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(
+        description='Create service account for Google Workspace tools.')
+    parser.add_argument(
+        '--tool',
+        choices=TOOL_CONFIGS.keys(),
+        help='Tool to configure settings for.')
+    parser.add_argument('--tool-name', help='Name of the tool.')
+    parser.add_argument(
+        '--tool-friendly-name',
+        help='Friendly name of the tool.')
+    parser.add_argument('--help-center-url', help='Help center URL.')
+    parser.add_argument(
+        '--apis',
+        help='Comma-separated list of APIs to enable.')
+    parser.add_argument(
+        '--scopes',
+        help='Comma-separated list of scopes required.')
+
+    return parser.parse_args()
+
+
+def setup_config(args):
+    global TOOL_NAME, TOOL_NAME_FRIENDLY, TOOL_HELP_CENTER_URL, APIS, SCOPES, USER_AGENT, KEY_FILE
+
+    if args.tool:
+        config = TOOL_CONFIGS[args.tool]
+        TOOL_NAME = config["TOOL_NAME"]
+        TOOL_NAME_FRIENDLY = config["TOOL_NAME_FRIENDLY"]
+        TOOL_HELP_CENTER_URL = config["TOOL_HELP_CENTER_URL"]
+        APIS = config["APIS"]
+        SCOPES = config["SCOPES"]
+
+    if args.tool_name:
+        TOOL_NAME = args.tool_name
+    if args.tool_friendly_name:
+        TOOL_NAME_FRIENDLY = args.tool_friendly_name
+    if args.help_center_url:
+        TOOL_HELP_CENTER_URL = args.help_center_url
+    if args.apis:
+        APIS = []
+        for api in args.apis.split(','):
+            api = api.strip()
+            if '.' not in api:
+                api += '.googleapis.com'
+            APIS.append(api)
+
+    if args.scopes:
+        SCOPES = []
+        for scope in args.scopes.split(','):
+            scope = scope.strip()
+            if not scope.startswith('https://'):
+                scope = 'https://www.googleapis.com/auth/' + scope
+            SCOPES.append(scope)
+
+    if not TOOL_NAME:
+        logging.error(
+            "TOOL_NAME is not set. Please specify --tool or --tool-name.")
+        sys.exit(1)
+
+    USER_AGENT = f"{TOOL_NAME}_create_service_account_v{VERSION}"
+    KEY_FILE = (f"{pathlib.Path.home()}/{TOOL_NAME.lower()}-service-account-key-"
+                f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.json")
+
+
+async def create_project():
+    logging.info("Creating project...")
+    project_id = f"{TOOL_NAME.lower()}-{int(time.time() * 1000)}"
+    project_name = (f"{TOOL_NAME}-"
+                    f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    await retryable_command(f"gcloud projects create {project_id} "
+                            f"--name {project_name} --set-as-default")
+    logging.info("%s successfully created \u2705", project_id)
+
+
+async def verify_tos_accepted():
+    logging.info("Verifying acceptance of Terms of service...")
+    tos_accepted = False
+    while APIS and not tos_accepted:
+        command = f"gcloud services enable {APIS[0]}"
+        _, stderr, return_code = await retryable_command(
+            command, max_num_retries=1, suppress_errors=True)
+        if return_code:
+            err_str = stderr.decode()
+            if "UREQ_TOS_NOT_ACCEPTED" in err_str:
+                if "universal" in err_str:
+                    logging.debug("Google APIs Terms of Service not accepted")
+                    print(
+                        "You must first accept the Google APIs Terms of Service. You "
+                        "can accept the terms of service by clicking "
+                        "https://console.developers.google.com/terms/universal and "
+                        "clicking 'Accept'.\n")
+                elif "appsadmin" in err_str:
+                    logging.debug(
+                        "Google Apps Admin APIs Terms of Service not accepted")
+                    print(
+                        "You must first accept the Google Apps Admin APIs Terms of "
+                        "Service. You can accept the terms of service by clicking "
+                        "https://console.developers.google.com/terms/appsadmin and "
+                        "clicking 'Accept'.\n")
+                answer = input(
+                    "\u2753 If you've accepted the terms of service, press "
+                    "Enter to try again or 'n' to cancel: ")
+                if answer.lower() == "n":
+                    sys.exit(0)
+            else:
+                logging.critical(err_str)
+                sys.exit(1)
+        else:
+            tos_accepted = True
+    logging.info("Terms of service acceptance verified \u2705")
+
+
+async def enable_apis():
+    logging.info("Enabling APIs...")
+    # verify_tos_accepted checks the first API, so skip it here.
+    enable_api_calls = map(enable_api, APIS[1:])
+    await asyncio.gather(*enable_api_calls)
+    logging.info("APIs successfully enabled \u2705")
+
+
+async def handle_org_policies():
+    """Checks and handles organization policies."""
+    logging.info("Checking organization policies...")
+    project_id = await get_project_id()
+    policies_to_check = [
+        "iam.disableServiceAccountKeyCreation",
+        "iam.managed.disableServiceAccountKeyCreation"
+    ]
+    enforced_policies = []
+
+    for policy in policies_to_check:
+        command = (f"gcloud org-policies describe {policy} "
+                   f"--project={project_id} --effective")
+        stdout, _, return_code = await retryable_command(
+            command, suppress_errors=True)
+        if return_code == 0 and "enforce: true" in stdout.decode().lower():
+            enforced_policies.append(policy)
+
+    if not enforced_policies:
+        logging.info("No restrictive organization policies found \u2705")
+        return
+
+    logging.warning("The following organization policies are enforced: %s",
+                    ", ".join(enforced_policies))
+
+    role_added_by_script = False
+    organization_id = await get_organization_id()
+    admin_user_email = await get_admin_user_email()
+    try:
+        command = (f"gcloud organizations get-iam-policy {organization_id} "
+                   "--format=json")
+        stdout, _, _ = await retryable_command(command, require_output=True)
+        iam_policy = json.loads(stdout)
+
+        is_org_admin = False
+        for binding in iam_policy.get("bindings", []):
+            if binding.get("role") == "roles/orgpolicy.policyAdmin":
+                if f"user:{admin_user_email}" in binding.get("members", []):
+                    is_org_admin = True
+                    break
+
+        if not is_org_admin:
+            add_iam_policy_binding_command = (
+                f"gcloud organizations add-iam-policy-binding {organization_id} "
+                f"--member=user:{admin_user_email} "
+                "--role=roles/orgpolicy.policyAdmin")
+
+            logging.warning(
+                "User %s isn't an org policy admin.",
+                admin_user_email)
+            print(
+                "The script needs to grant the 'Org Policy Administrator' role to "
+                f"the current user ({admin_user_email}) to proceed.\n")
+            answer = input(
+                "\u2753 Press Enter to approve this, or 'n' to exit: ")
+            if answer.lower() == "n":
+                logging.error(
+                    "The user didn't allow the script to add the role.")
+                print(
+                    "The script can't proceed with creating the required service "
+                    f"account key without the current user ({admin_user_email}) "
+                    "having the 'Org Policy Administrator' role.\n\n"
+                    "To resolve this, visit "
+                    "https://console.cloud.google.com/iam-admin/iam?organizationId="
+                    f"{organization_id} and grant this role, or run this command:\n\n"
+                    f"{add_iam_policy_binding_command}\n\n"
+                    "Then, run this script again.\n")
+                sys.exit(1)
+
+            await retryable_command(add_iam_policy_binding_command)
+            role_added_by_script = True
+            logging.info(
+                "'Org Policy Administrator' role granted successfully. \u2705")
+
+        for policy in enforced_policies:
+            if policy.startswith("iam.managed"):
+                command = "gcloud org-policies set-policy /dev/stdin"
+                stdin_text = (f"""
+name: projects/{project_id}/policies/{policy}
+spec:
+  rules:
+    - enforce: false
+""")
+            else:
+                command = (f"gcloud resource-manager org-policies disable-enforce "
+                           f"{policy} --project={project_id}")
+                stdin_text = None
+            await retryable_command(command, stdin=stdin_text)
+            logging.info("Policy %s disabled for project %s. \u2705", policy,
+                         project_id)
+
+    finally:
+        if role_added_by_script:
+            command = (
+                f"gcloud organizations remove-iam-policy-binding {organization_id} "
+                f"--member=user:{admin_user_email} "
+                "--role=roles/orgpolicy.policyAdmin")
+            await retryable_command(command, suppress_errors=True)
+            logging.info(
+                "'Org Policy Administrator' role removed successfully. \u2705")
+
+
+async def create_service_account():
+    logging.info("Creating service account...")
+    service_account_name = f"{TOOL_NAME.lower()}-service-account"
+    service_account_display_name = f"{TOOL_NAME} Service Account"
+    await retryable_command(f"gcloud iam service-accounts create "
+                            f"{service_account_name} --display-name "
+                            f'"{service_account_display_name}"')
+    logging.info("%s successfully created \u2705", service_account_name)
+
+
+async def create_service_account_key():
+    logging.info("Creating service account key...")
+    service_account_email = await get_service_account_email()
+    # Allowing for a long set of retries because if the org policies on the
+    # project were changed, it could take a while for them to apply.
+    await retryable_command(f"gcloud iam service-accounts keys create {KEY_FILE} "
+                            f"--iam-account={service_account_email}",
+                            max_num_retries=20, retry_delay=10)
+    logging.info("Service account key successfully created \u2705")
+
+
+async def authorize_service_account():
+    service_account_id = await get_service_account_id()
+    scopes = urllib.parse.quote(",".join(SCOPES), safe="")
+    authorize_url = DWD_URL_FORMAT.format(service_account_id, scopes)
+    input(f"\n\u2753 Before using {TOOL_NAME_FRIENDLY}, you must authorize the "
+          "service account to perform actions on behalf of your users. Visit "
+          f"this link:\n\n{authorize_url}\n\nAfter clicking 'Authorize', return "
+          "here and press Enter to continue.")
+
+
+async def verify_service_account_authorization():
+    logging.info("Verifying service account authorization...")
+    admin_user_email = await get_admin_user_email()
+    service_account_id = await get_service_account_id()
+    scopes_are_authorized = False
+    while not scopes_are_authorized:
+        scope_authorization_failures = []
+        for scope in SCOPES:
+            scope_authorized = verify_scope_authorization(
+                admin_user_email, scope)
+            if not scope_authorized:
+                scope_authorization_failures.append(scope)
+        if scope_authorization_failures:
+            scopes = urllib.parse.quote(",".join(SCOPES), safe="")
+            authorize_url = DWD_URL_FORMAT.format(service_account_id, scopes)
+            logging.info("The service account is not properly authorized.")
+            logging.warning("The following scopes are missing:")
+            for scope in scope_authorization_failures:
+                logging.warning("\t- %s", scope)
+            print(
+                "\nTo fix this, please click the following link. After clicking "
+                "'Authorize', return here to try again. If you are confident "
+                "that these scopes have already been added, then you may continue "
+                "now. If you encounter OAuth errors in the migration tool, then "
+                "you may need to wait for the changes to propagate. Propagation "
+                "generally takes less than 1 hour. However, in rare cases, it can "
+                "take up to 24 hours.")
+            print(f"\n{authorize_url}\n")
+            answer = input(
+                "\u2753 "
+                "Press Enter to try again, 'c' to continue, or 'n' to cancel: ")
+            if answer.lower == "c":
+                scopes_are_authorized = True
+            if answer.lower() == "n":
+                sys.exit(0)
+        else:
+            scopes_are_authorized = True
+    logging.info("Service account successfully authorized \u2705")
+
+
+async def verify_api_access():
+    logging.info("Verifying API access...")
+    admin_user_email = await get_admin_user_email()
+    project_id = await get_project_id()
+    token = get_access_token_for_scopes(admin_user_email, SCOPES)
+    retry_api_verification = True
+    while retry_api_verification:
+        disabled_apis = {}
+        disabled_services = []
+        retry_api_verification = False
+        for api in APIS:
+            api_name = service_name = ""
+            raw_api_response = ""
+            if api == "admin.googleapis.com":
+                # Admin SDK does not have a corresponding service.
+                api_name = "Admin SDK"
+                raw_api_response = execute_api_request(
+                    f"https://admin.googleapis.com/admin/directory/v1/users/{admin_user_email}?fields=isAdmin",
+                    token)
+            if api == "calendar-json.googleapis.com":
+                api_name = service_name = "Calendar"
+                raw_api_response = execute_api_request(
+                    "https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1&fields=kind",
+                    token)
+            if api == "contacts.googleapis.com":
+                # Contacts does not have a corresponding service.
+                api_name = "Contacts"
+                raw_api_response = execute_api_request(
+                    "https://www.google.com/m8/feeds/contacts/a.com/full/invalid_contact", token)
+            if api == "people.googleapis.com":
+                # People (Contacts) does not have a corresponding service.
+                api_name = "People"
+                raw_api_response = execute_api_request(
+                    "https://people.googleapis.com/v1/people/me/connections?pageSize=1&personFields=metadata",
+                    token)
+            if api == "drive.googleapis.com":
+                api_name = service_name = "Drive"
+                raw_api_response = execute_api_request(
+                    "https://www.googleapis.com/drive/v3/files?pageSize=1&fields=kind", token)
+            if api == "gmail.googleapis.com":
+                api_name = service_name = "Gmail"
+                raw_api_response = execute_api_request(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/labels?fields=labels.id", token)
+            if api == "tasks.googleapis.com":
+                api_name = service_name = "Tasks"
+                raw_api_response = execute_api_request(
+                    "https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=1&fields=kind",
+                    token)
+
+            if is_api_disabled(raw_api_response):
+                disabled_apis[api_name] = api
+                retry_api_verification = True
+
+            if service_name and is_service_disabled(raw_api_response):
+                disabled_services.append(service_name)
+                retry_api_verification = True
+
+        if disabled_apis:
+            disabled_api_message = (
+                "- The {} API is not enabled. Please enable it by clicking "
+                "https://console.developers.google.com/apis/api/{}/overview?project={}.")
+            for api_name in disabled_apis:
+                api_id = disabled_apis[api_name]
+                print(
+                    disabled_api_message.format(
+                        api_name, api_id, project_id))
+            print(
+                "\nIf these APIs are already enabled, then you may need to wait "
+                "for the changes to propagate. Propagation generally takes a few "
+                "minutes. However, in rare cases, it can take up to 24 hours.\n")
+
+        if not disabled_apis and disabled_services:
+            disabled_service_message = "The {0} service is not enabled for {1}."
+            for service in disabled_services:
+                print(
+                    disabled_service_message.format(
+                        service, admin_user_email))
+            print(
+                "\nIf this is expected, then please continue. If this is not "
+                "expected, then please ensure that these services are enabled for "
+                "your users by visiting "
+                "https://admin.google.com/ac/appslist/core.\n")
+
+        if retry_api_verification:
+            answer = input(
+                "\u2753 "
+                "Press Enter to try again, 'c' to continue, or 'n' to cancel: ")
+            if answer.lower() == "c":
+                retry_api_verification = False
+            if answer.lower() == "n":
+                sys.exit(0)
+
+    logging.info("API access verified \u2705")
+
+
+async def download_service_account_key():
+    command = f"cloudshell download {KEY_FILE}"
+    await retryable_command(command)
+
+
+async def delete_key():
+    input("\nPress Enter after you have downloaded the file.")
+    logging.debug(f"Deleting key file ${KEY_FILE}...")
+    command = f"shred -u {KEY_FILE}"
+    await retryable_command(command)
+
+
+async def enable_api(api):
+    command = f"gcloud services enable {api}"
+    await retryable_command(command)
+
+
+def verify_scope_authorization(subject, scope):
+    try:
+        get_access_token_for_scopes(subject, [scope])
+        return True
+    except RefreshError:
+        logging.debug("Can't get token for scope %s", scope, exc_info=True)
+        return False
+    except BaseException:
+        e = sys.exc_info()[0]
+        logging.error("An unknown error occurred: %s", e)
+        return False
+
+
+def get_access_token_for_scopes(subject, scopes):
+    logging.debug(
+        "Getting access token for scopes %s, user %s",
+        scopes,
+        subject)
+    credentials = service_account.Credentials.from_service_account_file(
+        KEY_FILE, scopes=scopes)
+    delegated_credentials = credentials.with_subject(subject)
+    request = Request(Http())
+    delegated_credentials.refresh(request)
+    logging.debug("Successfully obtained access token")
+    return delegated_credentials.token
+
+
+def execute_api_request(url, token):
+    try:
+        http = Http()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT
+        }
+        logging.debug("Executing API request %s", url)
+        _, content = http.request(url, "GET", headers=headers)
+        logging.debug("Response: %s", content.decode())
+        return content
+    except BaseException:
+        e = sys.exc_info()[0]
+        logging.error("Failed to execute API request: %s", e)
+        return None
+
+
+def is_api_disabled(raw_api_response):
+    if raw_api_response is None:
+        return True
+    try:
+        api_response = json.loads(raw_api_response)
+        return "it is disabled" in api_response["error"]["message"]
+    except BaseException:
+        pass
+    return False
+
+
+def is_service_disabled(raw_api_response):
+    if raw_api_response is None:
+        return True
+    try:
+        api_response = json.loads(raw_api_response)
+        error_reason = api_response["error"]["errors"][0]["reason"]
+        if "notACalendarUser" or "notFound" or "authError" in error_reason:
+            return True
+    except BaseException:
+        pass
+
+    try:
+        api_response = json.loads(raw_api_response)
+        if "service not enabled" in api_response["error"]["message"]:
+            return True
+    except BaseException:
+        pass
+
+    return False
+
+
+async def retryable_command(command,
+                            max_num_retries=3,
+                            retry_delay=5,
+                            suppress_errors=False,
+                            require_output=False,
+                            stdin=None):
+    num_tries = 1
+    while num_tries <= max_num_retries:
+        logging.debug("Executing command (attempt %d): %s", num_tries, command)
+        if stdin is not None:
+            logging.debug("stdin: %s", stdin)
+        process = await asyncio.create_subprocess_shell(
+            command,
+            stdin=asyncio.subprocess.PIPE if stdin else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate(input=stdin.encode() if stdin else None)
+        return_code = process.returncode
+
+        logging.debug("stdout: %s", stdout.decode())
+        logging.debug("stderr: %s", stderr.decode())
+        logging.debug("Return code: %d", return_code)
+
+        if return_code == 0:
+            if not require_output or (require_output and stdout):
+                return (stdout, stderr, return_code)
+
+        if num_tries < max_num_retries:
+            num_tries += 1
+            await asyncio.sleep(retry_delay)
+        elif suppress_errors:
+            return (stdout, stderr, return_code)
+        else:
+            if stdin is not None:
+                logging.critical(
+                    "Failed to execute command: %s\n\nstdin:\n`%s`\n\nstderr:\n`%s`",
+                    command,
+                    stdin,
+                    stderr.decode())
+            else:
+                logging.critical(
+                    "Failed to execute command: %s\n\nstderr:\n`%s`",
+                    command,
+                    stderr.decode())
+            sys.exit(return_code)
+
+
+async def get_project_id():
+    command = "gcloud config get-value project"
+    project_id, _, _ = await retryable_command(command, require_output=True)
+    return project_id.decode().rstrip()
+
+
+async def get_service_account_id():
+    command = 'gcloud iam service-accounts list --format="value(uniqueId)"'
+    service_account_id, _, _ = await retryable_command(
+        command, require_output=True)
+    return service_account_id.decode().rstrip()
+
+
+async def get_service_account_email():
+    command = 'gcloud iam service-accounts list --format="value(email)"'
+    service_account_email, _, _ = await retryable_command(
+        command, require_output=True)
+    return service_account_email.decode().rstrip()
+
+
+async def get_admin_user_email():
+    command = 'gcloud auth list --format="value(account)"'
+    admin_user_email, _, _ = await retryable_command(command, require_output=True)
+    return admin_user_email.decode().rstrip()
+
+
+async def get_organization_id():
+    command = 'gcloud organizations list --format="value(ID)"'
+    org_id, _, _ = await retryable_command(command, require_output=True)
+    return org_id.decode().rstrip()
+
+
+def init_logger():
+    # Log DEBUG level messages and above to a file
+    logging.basicConfig(
+        filename=f"{TOOL_NAME}_create_service_account.log",
+        format="[%(asctime)s][%(levelname)s] %(message)s",
+        datefmt="%FT%TZ",
+        level=logging.DEBUG)
+
+    # Log INFO level messages and above to the console
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger("").addHandler(console)
+
+
+async def main():
+    args = parse_arguments()
+    setup_config(args)
+    init_logger()
+    os.system("clear")
+    response = input(
+        "Welcome! This script will create and authorize the resources that are "
+        f"necessary to use {TOOL_NAME_FRIENDLY}. The following steps will be "
+        "performed on your behalf:\n\n"
+        "1. Create a Google Cloud Platform project\n"
+        "2. Enable APIs\n"
+        "3. Verify that the org policies allow creating service account keys\n"
+        "4. Create a service account\n"
+        "5. Authorize the service account\n"
+        "6. Create a service account key\n\n"
+        "In the end, you will be prompted to download the service account key. "
+        f"This key can then be used for {TOOL_NAME_FRIENDLY}.\n\n"
+        "If you would like to perform these steps manually, then you can follow "
+        f"the instructions at {TOOL_HELP_CENTER_URL}."
+        "\n\nPress Enter to continue or 'n' to exit: ")
+
+    if response.lower() == "n":
+        sys.exit(0)
+
+    await create_project()
+    await verify_tos_accepted()
+    await enable_apis()
+    await handle_org_policies()
+    await create_service_account()
+    await authorize_service_account()
+    await create_service_account_key()
+    await verify_service_account_authorization()
+    await verify_api_access()
+    await download_service_account_key()
+    await delete_key()
+
+    logging.info("Done! \u2705")
+    print(
+        "\nIf you have already downloaded the file, then you may close this "
+        "page. Please remember that this file is highly sensitve. Any person "
+        "who gains access to the key file will then have full access to all "
+        "resources to which the service account has access. You should treat "
+        "it just like you would a password.")
+
+    if TOOL_NAME == "GWM":
+        project_id = await get_project_id()
+        print("\nNext, follow the instructions to create the OAuth web client "
+              f"ID for project {project_id}. You can create this by going to "
+              f"{OAUTH_CONSENT_SCREEN_URL_FORMAT.format(project_id)}. The "
+              "instructions can be found here: "
+              f"{CREATE_OAUTH_WEB_CLIENT_ID_URL}.\n")
+
+if __name__ == "__main__":
+    asyncio.run(main())
