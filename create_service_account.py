@@ -35,6 +35,7 @@ import pathlib
 import sys
 import time
 import urllib.parse
+import subprocess
 
 from google_auth_httplib2 import Request
 from httplib2 import Http
@@ -160,6 +161,10 @@ def parse_arguments():
     parser.add_argument(
         '--scopes',
         help='Comma-separated list of scopes required.')
+    parser.add_argument(
+        '--no-key',
+        action='store_true',
+        help='Skip service account key creation.')
 
     return parser.parse_args()
 
@@ -566,14 +571,108 @@ def get_access_token_for_scopes(subject, scopes):
         "Getting access token for scopes %s, user %s",
         scopes,
         subject)
-    credentials = service_account.Credentials.from_service_account_file(
-        KEY_FILE, scopes=scopes)
-    delegated_credentials = credentials.with_subject(subject)
-    request = Request(Http())
-    delegated_credentials.refresh(request)
-    logging.debug("Successfully obtained access token")
-    return delegated_credentials.token
+    if os.path.exists(KEY_FILE):
+        credentials = service_account.Credentials.from_service_account_file(
+            KEY_FILE, scopes=scopes)
+        delegated_credentials = credentials.with_subject(subject)
+        request = Request(Http())
+        delegated_credentials.refresh(request)
+        logging.debug("Successfully obtained access token")
+        return delegated_credentials.token
+    else:
+        # If no key file exists (e.g. --no-key was used), create a signed JWT
+        # using gcloud and exchange it for an access token.
+        project_id = subprocess.check_output(
+            ["gcloud", "config", "get-value", "project"],
+            stderr=subprocess.PIPE
+        ).decode().strip()
+        service_account_email = f"{TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com"
 
+        now = int(time.time())
+        expiry = now + 3600
+        payload = {
+            "iss": service_account_email,
+            "sub": subject,
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": now,
+            "exp": expiry,
+            "scope": " ".join(scopes)
+        }
+
+        # Create a temporary file for the payload
+        payload_file = f"jwt_payload_{now}.json"
+        with open(payload_file, "w") as f:
+            json.dump(payload, f)
+
+        jwt_output_file = f"jwt_signed_{now}.jwt"
+
+        try:
+            logging.debug("Signing JWT using gcloud iam service-accounts sign-jwt...")
+            command = [
+                "gcloud", "iam", "service-accounts", "sign-jwt",
+                "--iam-account", service_account_email,
+                payload_file, jwt_output_file
+            ]
+
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            stdout, stderr = process.communicate()
+
+            if process.returncode != 0:
+                logging.error("Failed to sign JWT: %s", stderr.decode())
+                raise RuntimeError(f"Failed to sign JWT: {stderr.decode()}")
+
+            with open(jwt_output_file, "r") as f:
+                signed_jwt = f.read().strip()
+
+            # Exchange the signed JWT for an access token
+            # We can't use google-auth directly here easily because we have the
+            # fully signed JWT which is for an access token request, not a
+            # service account credential that signs arbitrary blobs.
+
+            # The signed JWT is actually ready to be sent to the token endpoint.
+            # But wait, sign-jwt creates a self-signed JWT?
+            # Yes, standard service account flow.
+            # However, for Domain-Wide Delegation, the 'sub' field in the JWT
+            # claims acts as the user we are impersonating.
+            # The 'iss' is the service account.
+
+            # So the payload we constructed above is correct for DWD.
+
+            # Now we need to POST to the token endpoint.
+            http = Http()
+            token_url = "https://oauth2.googleapis.com/token"
+            body = {
+                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                "assertion": signed_jwt
+            }
+            logging.debug("Exchanging JWT for access token...")
+            resp, content = http.request(
+                token_url,
+                "POST",
+                body=urllib.parse.urlencode(body),
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+
+            if resp.status != 200:
+                logging.error("Failed to exchange JWT for token: %s", content.decode())
+                raise RuntimeError(f"Failed to exchange JWT for token: {content.decode()}")
+
+            token_response = json.loads(content)
+            logging.debug("Successfully obtained access token via signed JWT")
+            return token_response["access_token"]
+
+        except Exception as e:
+            logging.error("Error getting access token without key file: %s", e)
+            raise
+        finally:
+            if os.path.exists(payload_file):
+                os.remove(payload_file)
+            if os.path.exists(jwt_output_file):
+                os.remove(jwt_output_file)
 
 def execute_api_request(url, token):
     try:
@@ -677,6 +776,12 @@ async def get_project_id():
     project_id, _, _ = await retryable_command(command, require_output=True)
     return project_id.decode().rstrip()
 
+# Helper for synchronous calls
+def get_project_id_sync():
+    return subprocess.check_output(
+        ["gcloud", "config", "get-value", "project"],
+        stderr=subprocess.PIPE
+    ).decode().strip()
 
 async def get_service_account_id():
     command = 'gcloud iam service-accounts list --format="value(uniqueId)"'
@@ -750,19 +855,22 @@ async def main():
     await handle_org_policies()
     await create_service_account()
     await authorize_service_account()
-    await create_service_account_key()
+    if not args.no_key:
+        await create_service_account_key()
     await verify_service_account_authorization()
     await verify_api_access()
-    await download_service_account_key()
-    await delete_key()
+    if not args.no_key:
+        await download_service_account_key()
+        await delete_key()
 
     logging.info("Done! \u2705")
-    print(
-        "\nIf you have already downloaded the file, then you may close this "
-        "page. Please remember that this file is highly sensitve. Any person "
-        "who gains access to the key file will then have full access to all "
-        "resources to which the service account has access. You should treat "
-        "it just like you would a password.")
+    if not args.no_key:
+        print(
+            "\nIf you have already downloaded the file, then you may close this "
+            "page. Please remember that this file is highly sensitve. Any person "
+            "who gains access to the key file will then have full access to all "
+            "resources to which the service account has access. You should treat "
+            "it just like you would a password.")
 
     if TOOL_NAME == "GWM":
         project_id = await get_project_id()

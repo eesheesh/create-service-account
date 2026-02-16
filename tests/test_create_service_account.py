@@ -122,5 +122,49 @@ class TestCreateServiceAccount(unittest.TestCase):
         ]
         self.assertEqual(create_service_account.SCOPES, expected_scopes)
 
+    @patch('create_service_account.subprocess.check_output')
+    @patch('create_service_account.subprocess.Popen')
+    @patch('create_service_account.Http.request')
+    @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data="signed_jwt_content")
+    @patch('create_service_account.os.path.exists')
+    @patch('create_service_account.os.remove')
+    def test_get_access_token_no_key(self, mock_remove, mock_exists, mock_open, mock_request, mock_popen, mock_check_output):
+        # Setup mocks
+        mock_exists.return_value = False # KEY_FILE does not exist
+        create_service_account.KEY_FILE = "dummy_key.json"
+        create_service_account.TOOL_NAME = "TestTool"
+        mock_check_output.return_value = b"test-project"
+
+        # Mock Popen for gcloud sign-jwt
+        mock_process = unittest.mock.Mock()
+        mock_process.communicate.return_value = (b"", b"")
+        mock_process.returncode = 0
+        mock_popen.return_value = mock_process
+
+        # Mock Http request for token exchange
+        mock_request.return_value = (
+            unittest.mock.Mock(status=200),
+            b'{"access_token": "mock_access_token"}'
+        )
+
+        token = create_service_account.get_access_token_for_scopes("user@example.com", ["scope1"])
+
+        self.assertEqual(token, "mock_access_token")
+
+        # Verify gcloud command was called
+        args, _ = mock_popen.call_args
+        self.assertEqual(args[0][0], "gcloud")
+        self.assertEqual(args[0][1], "iam")
+        self.assertEqual(args[0][2], "service-accounts")
+        self.assertEqual(args[0][3], "sign-jwt")
+
+        # Verify token exchange request
+        mock_request.assert_called()
+        call_args = mock_request.call_args
+        self.assertEqual(call_args[0][0], "https://oauth2.googleapis.com/token")
+        self.assertEqual(call_args[0][1], "POST")
+        self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer", call_args[1]['body'])
+        self.assertIn("assertion=signed_jwt_content", call_args[1]['body'])
+
 if __name__ == '__main__':
     unittest.main()
