@@ -556,9 +556,9 @@ async def enable_api(api):
     await retryable_command(command)
 
 
-def verify_scope_authorization(subject, scope):
+async def verify_scope_authorization(subject, scope):
     try:
-        get_access_token_for_scopes(subject, [scope])
+        await get_access_token_for_scopes(subject, [scope])
         return True
     except RefreshError:
         logging.debug("Can't get token for scope %s", scope, exc_info=True)
@@ -569,8 +569,7 @@ def verify_scope_authorization(subject, scope):
         return False
 
 
-def get_access_token_for_scopes(subject, scopes):
-    # pylint: disable=too-many-locals
+async def get_access_token_for_scopes(subject, scopes):
     logging.debug(
         "Getting access token for scopes %s, user %s",
         scopes,
@@ -584,108 +583,86 @@ def get_access_token_for_scopes(subject, scopes):
         logging.debug("Successfully obtained access token")
         return delegated_credentials.token
     else:
-        # If no key file exists (e.g. --no-key was used), create a signed JWT
-        # using gcloud and exchange it for an access token.
-        project_id = subprocess.check_output(
-            ["gcloud", "config", "get-value", "project"],
-            stderr=subprocess.PIPE
-        ).decode().strip()
-        service_account_email = (
-            f"{TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com")
+        return await get_access_token_via_gcloud(subject, scopes)
 
-        now = int(time.time())
-        expiry = now + 3600
-        payload = {
-            "iss": service_account_email,
-            "sub": subject,
-            "aud": "https://oauth2.googleapis.com/token",
-            "iat": now,
-            "exp": expiry,
-            "scope": " ".join(scopes)
-        }
 
-        # Create a temporary file for the payload
-        payload_file = f"jwt_payload_{now}.json"
+async def get_access_token_via_gcloud(subject, scopes):
+    # If no key file exists (e.g. --no-key was used), create a signed JWT
+    # using gcloud and exchange it for an access token.
+    service_account_email = await get_service_account_email()
+
+    now = int(time.time())
+    expiry = now + 3600
+    payload = {
+        "iss": service_account_email,
+        "sub": subject,
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now,
+        "exp": expiry,
+        "scope": " ".join(scopes)
+    }
+
+    # Create a temporary file for the payload
+    payload_file = f"jwt_payload_{now}.json"
+    # pylint: disable=unspecified-encoding
+    with open(payload_file, "w") as f:
+        json.dump(payload, f)
+
+    jwt_output_file = f"jwt_signed_{now}.jwt"
+
+    try:
+        logging.debug(
+            "Signing JWT using gcloud iam service-accounts sign-jwt...")
+        command = (
+            "gcloud iam service-accounts sign-jwt "
+            f"--iam-account {service_account_email} "
+            f"{payload_file} {jwt_output_file}")
+
+        await retryable_command(command)
+
         # pylint: disable=unspecified-encoding
-        with open(payload_file, "w") as f:
-            json.dump(payload, f)
+        with open(jwt_output_file, "r") as f:
+            signed_jwt = f.read().strip()
 
-        jwt_output_file = f"jwt_signed_{now}.jwt"
+        # Exchange the signed JWT for an access token
+        http = Http()
+        token_url = "https://oauth2.googleapis.com/token"
+        body = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": signed_jwt
+        }
+        logging.debug("Exchanging JWT for access token...")
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT
+        }
+        resp, content = http.request(
+            token_url,
+            "POST",
+            body=urllib.parse.urlencode(body),
+            headers=headers
+        )
 
-        try:
-            logging.debug(
-                "Signing JWT using gcloud iam service-accounts sign-jwt...")
-            command = [
-                "gcloud", "iam", "service-accounts", "sign-jwt",
-                "--iam-account", service_account_email,
-                payload_file, jwt_output_file
-            ]
+        if resp.status != 200:
+            logging.error(
+                "Failed to exchange JWT for token: %s",
+                content.decode())
+            raise RuntimeError(
+                "Failed to exchange JWT for token: "
+                f"{content.decode()}")
 
-            # pylint: disable=consider-using-with
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            _, stderr = process.communicate()
+        token_response = json.loads(content)
+        logging.debug("Successfully obtained access token via signed JWT")
+        return token_response["access_token"]
 
-            if process.returncode != 0:
-                logging.error("Failed to sign JWT: %s", stderr.decode())
-                raise RuntimeError(f"Failed to sign JWT: {stderr.decode()}")
-
-            # pylint: disable=unspecified-encoding
-            with open(jwt_output_file, "r") as f:
-                signed_jwt = f.read().strip()
-
-            # Exchange the signed JWT for an access token
-            # We can't use google-auth directly here easily because we have the
-            # fully signed JWT which is for an access token request, not a
-            # service account credential that signs arbitrary blobs.
-
-            # The signed JWT is actually ready to be sent to the token endpoint.
-            # But wait, sign-jwt creates a self-signed JWT?
-            # Yes, standard service account flow.
-            # However, for Domain-Wide Delegation, the 'sub' field in the JWT
-            # claims acts as the user we are impersonating.
-            # The 'iss' is the service account.
-
-            # So the payload we constructed above is correct for DWD.
-
-            # Now we need to POST to the token endpoint.
-            http = Http()
-            token_url = "https://oauth2.googleapis.com/token"
-            body = {
-                "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                "assertion": signed_jwt
-            }
-            logging.debug("Exchanging JWT for access token...")
-            resp, content = http.request(
-                token_url,
-                "POST",
-                body=urllib.parse.urlencode(body),
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-
-            if resp.status != 200:
-                logging.error(
-                    "Failed to exchange JWT for token: %s",
-                    content.decode())
-                raise RuntimeError(
-                    "Failed to exchange JWT for token: "
-                    f"{content.decode()}")
-
-            token_response = json.loads(content)
-            logging.debug("Successfully obtained access token via signed JWT")
-            return token_response["access_token"]
-
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logging.error("Error getting access token without key file: %s", e)
-            raise
-        finally:
-            if os.path.exists(payload_file):
-                os.remove(payload_file)
-            if os.path.exists(jwt_output_file):
-                os.remove(jwt_output_file)
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.error("Error getting access token without key file: %s", e)
+        raise
+    finally:
+        if os.path.exists(payload_file):
+            os.remove(payload_file)
+        if os.path.exists(jwt_output_file):
+            os.remove(jwt_output_file)
 
 
 def execute_api_request(url, token):

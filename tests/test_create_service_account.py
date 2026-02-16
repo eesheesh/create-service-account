@@ -2,6 +2,7 @@ import unittest
 import sys
 import os
 import argparse
+import asyncio
 from unittest.mock import patch
 
 # Add parent directory to sys.path to import create_service_account
@@ -122,24 +123,23 @@ class TestCreateServiceAccount(unittest.TestCase):
         ]
         self.assertEqual(create_service_account.SCOPES, expected_scopes)
 
-    @patch('create_service_account.subprocess.check_output')
-    @patch('create_service_account.subprocess.Popen')
+    @patch('create_service_account.get_service_account_email', new_callable=unittest.mock.AsyncMock)
+    @patch('create_service_account.retryable_command', new_callable=unittest.mock.AsyncMock)
     @patch('create_service_account.Http.request')
     @patch('builtins.open', new_callable=unittest.mock.mock_open, read_data="signed_jwt_content")
     @patch('create_service_account.os.path.exists')
     @patch('create_service_account.os.remove')
-    def test_get_access_token_no_key(self, mock_remove, mock_exists, mock_open, mock_request, mock_popen, mock_check_output):
+    def test_get_access_token_no_key(self, mock_remove, mock_exists, mock_open, mock_request, mock_retryable, mock_get_email):
         # Setup mocks
         mock_exists.return_value = False # KEY_FILE does not exist
         create_service_account.KEY_FILE = "dummy_key.json"
         create_service_account.TOOL_NAME = "TestTool"
-        mock_check_output.return_value = b"test-project"
 
-        # Mock Popen for gcloud sign-jwt
-        mock_process = unittest.mock.Mock()
-        mock_process.communicate.return_value = (b"", b"")
-        mock_process.returncode = 0
-        mock_popen.return_value = mock_process
+        # Mock get_service_account_email (async)
+        mock_get_email.return_value = "tool-service-account@test-project.iam.gserviceaccount.com"
+
+        # Mock retryable_command (async)
+        mock_retryable.return_value = (b"", b"", 0)
 
         # Mock Http request for token exchange
         mock_request.return_value = (
@@ -147,16 +147,21 @@ class TestCreateServiceAccount(unittest.TestCase):
             b'{"access_token": "mock_access_token"}'
         )
 
-        token = create_service_account.get_access_token_for_scopes("user@example.com", ["scope1"])
+        token = asyncio.run(create_service_account.get_access_token_for_scopes("user@example.com", ["scope1"]))
 
         self.assertEqual(token, "mock_access_token")
 
-        # Verify gcloud command was called
-        args, _ = mock_popen.call_args
-        self.assertEqual(args[0][0], "gcloud")
-        self.assertEqual(args[0][1], "iam")
-        self.assertEqual(args[0][2], "service-accounts")
-        self.assertEqual(args[0][3], "sign-jwt")
+        # Verify gcloud command was called via retryable_command
+        # Expected command substring
+        mock_retryable.assert_called()
+        # Check if sign-jwt was called
+        found_sign_jwt = False
+        for call_args in mock_retryable.call_args_list:
+            command = call_args[0][0]
+            if "sign-jwt" in command:
+                found_sign_jwt = True
+                break
+        self.assertTrue(found_sign_jwt, "gcloud iam service-accounts sign-jwt was not called")
 
         # Verify token exchange request
         mock_request.assert_called()
