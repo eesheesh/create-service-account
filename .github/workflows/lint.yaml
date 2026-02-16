@@ -1,35 +1,24 @@
-name: Lint
+name: Lint Code Base
 
 on: [push, pull_request]
 
 jobs:
-  lint-python:
-    name: Lint Python
+  build:
+    name: Lint Code Base
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up Python
-        uses: actions/setup-python@v2
-        with:
-          python-version: '3.x'
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pylint google-auth google-auth-httplib2 httplib2
-      - name: Lint with pylint
-        run: |
-          pylint create_service_account.py
 
-  lint-markdown:
-    name: Lint Markdown
-    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - name: Use Node.js
-        uses: actions/setup-node@v2
+      - name: Checkout Code
+        uses: actions/checkout@v3
         with:
-          node-version: '14'
-      - name: Install markdownlint-cli
-        run: npm install -g markdownlint-cli
-      - name: Run markdownlint
-        run: markdownlint '**/*.md' --ignore CONTRIBUTING.md
+          fetch-depth: 0
+
+      - name: Lint Code Base
+        uses: super-linter/super-linter@v5
+        env:
+          VALIDATE_ALL_CODEBASE: true
+          DEFAULT_BRANCH: main
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALIDATE_PYTHON_PYLINT: true
+          VALIDATE_MARKDOWN: true
+          FILTER_REGEX_EXCLUDE: .*CONTRIBUTING.md

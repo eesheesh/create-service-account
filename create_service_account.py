@@ -170,6 +170,7 @@ def parse_arguments():
 
 
 def setup_config(args):
+    # pylint: disable=global-statement
     global TOOL_NAME, TOOL_NAME_FRIENDLY, TOOL_HELP_CENTER_URL, APIS, SCOPES, USER_AGENT, KEY_FILE
 
     if args.tool:
@@ -269,6 +270,7 @@ async def enable_apis():
 
 
 async def handle_org_policies():
+    # pylint: disable=too-many-locals, too-many-branches, too-many-statements
     """Checks and handles organization policies."""
     logging.info("Checking organization policies...")
     project_id = await get_project_id()
@@ -442,6 +444,7 @@ async def verify_service_account_authorization():
 
 
 async def verify_api_access():
+    # pylint: disable=too-many-locals, too-many-branches, too-many-statements
     logging.info("Verifying API access...")
     admin_user_email = await get_admin_user_email()
     project_id = await get_project_id()
@@ -560,13 +563,14 @@ def verify_scope_authorization(subject, scope):
     except RefreshError:
         logging.debug("Can't get token for scope %s", scope, exc_info=True)
         return False
-    except BaseException:
+    except BaseException:  # pylint: disable=broad-exception-caught
         e = sys.exc_info()[0]
         logging.error("An unknown error occurred: %s", e)
         return False
 
 
 def get_access_token_for_scopes(subject, scopes):
+    # pylint: disable=too-many-locals
     logging.debug(
         "Getting access token for scopes %s, user %s",
         scopes,
@@ -586,7 +590,8 @@ def get_access_token_for_scopes(subject, scopes):
             ["gcloud", "config", "get-value", "project"],
             stderr=subprocess.PIPE
         ).decode().strip()
-        service_account_email = f"{TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com"
+        service_account_email = f"{
+            TOOL_NAME.lower()}-service-account@{project_id}.iam.gserviceaccount.com"
 
         now = int(time.time())
         expiry = now + 3600
@@ -601,30 +606,34 @@ def get_access_token_for_scopes(subject, scopes):
 
         # Create a temporary file for the payload
         payload_file = f"jwt_payload_{now}.json"
+        # pylint: disable=unspecified-encoding
         with open(payload_file, "w") as f:
             json.dump(payload, f)
 
         jwt_output_file = f"jwt_signed_{now}.jwt"
 
         try:
-            logging.debug("Signing JWT using gcloud iam service-accounts sign-jwt...")
+            logging.debug(
+                "Signing JWT using gcloud iam service-accounts sign-jwt...")
             command = [
                 "gcloud", "iam", "service-accounts", "sign-jwt",
                 "--iam-account", service_account_email,
                 payload_file, jwt_output_file
             ]
 
+            # pylint: disable=consider-using-with
             process = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
-            stdout, stderr = process.communicate()
+            _, stderr = process.communicate()
 
             if process.returncode != 0:
                 logging.error("Failed to sign JWT: %s", stderr.decode())
                 raise RuntimeError(f"Failed to sign JWT: {stderr.decode()}")
 
+            # pylint: disable=unspecified-encoding
             with open(jwt_output_file, "r") as f:
                 signed_jwt = f.read().strip()
 
@@ -658,14 +667,18 @@ def get_access_token_for_scopes(subject, scopes):
             )
 
             if resp.status != 200:
-                logging.error("Failed to exchange JWT for token: %s", content.decode())
-                raise RuntimeError(f"Failed to exchange JWT for token: {content.decode()}")
+                logging.error(
+                    "Failed to exchange JWT for token: %s",
+                    content.decode())
+                raise RuntimeError(
+                    f"Failed to exchange JWT for token: {
+                        content.decode()}")
 
             token_response = json.loads(content)
             logging.debug("Successfully obtained access token via signed JWT")
             return token_response["access_token"]
 
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logging.error("Error getting access token without key file: %s", e)
             raise
         finally:
@@ -673,6 +686,7 @@ def get_access_token_for_scopes(subject, scopes):
                 os.remove(payload_file)
             if os.path.exists(jwt_output_file):
                 os.remove(jwt_output_file)
+
 
 def execute_api_request(url, token):
     try:
@@ -686,7 +700,7 @@ def execute_api_request(url, token):
         _, content = http.request(url, "GET", headers=headers)
         logging.debug("Response: %s", content.decode())
         return content
-    except BaseException:
+    except BaseException:  # pylint: disable=broad-exception-caught
         e = sys.exc_info()[0]
         logging.error("Failed to execute API request: %s", e)
         return None
@@ -698,7 +712,7 @@ def is_api_disabled(raw_api_response):
     try:
         api_response = json.loads(raw_api_response)
         return "it is disabled" in api_response["error"]["message"]
-    except BaseException:
+    except BaseException:  # pylint: disable=broad-exception-caught
         pass
     return False
 
@@ -709,16 +723,17 @@ def is_service_disabled(raw_api_response):
     try:
         api_response = json.loads(raw_api_response)
         error_reason = api_response["error"]["errors"][0]["reason"]
+        # pylint: disable=condition-evals-to-constant
         if "notACalendarUser" or "notFound" or "authError" in error_reason:
             return True
-    except BaseException:
+    except BaseException:  # pylint: disable=broad-exception-caught
         pass
 
     try:
         api_response = json.loads(raw_api_response)
         if "service not enabled" in api_response["error"]["message"]:
             return True
-    except BaseException:
+    except BaseException:  # pylint: disable=broad-exception-caught
         pass
 
     return False
@@ -777,11 +792,14 @@ async def get_project_id():
     return project_id.decode().rstrip()
 
 # Helper for synchronous calls
+
+
 def get_project_id_sync():
     return subprocess.check_output(
         ["gcloud", "config", "get-value", "project"],
         stderr=subprocess.PIPE
     ).decode().strip()
+
 
 async def get_service_account_id():
     command = 'gcloud iam service-accounts list --format="value(uniqueId)"'
