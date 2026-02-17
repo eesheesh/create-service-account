@@ -539,20 +539,15 @@ async def get_access_token_via_gcloud(subject, scopes):
       "exp": expiry,
       "scope": " ".join(scopes)
   }
-  # Create a temporary file for the payload
-  payload_file = f"jwt_payload_{now}.json"
-  with open(payload_file, "w", encoding='utf-8') as f:
-    json.dump(payload, f)
-  jwt_output_file = f"jwt_signed_{now}.jwt"
   try:
     logging.debug("Signing JWT using gcloud iam service-accounts sign-jwt...")
     command = ("gcloud iam service-accounts sign-jwt "
                f"--iam-account {service_account_email} "
-               f"{payload_file} {jwt_output_file}")
-    await retryable_command(command)
-    # pylint: disable=unspecified-encoding
-    with open(jwt_output_file, "r") as f:
-      signed_jwt = f.read().strip()
+               "/dev/stdin /dev/stdout")
+    stdout, _, _ = await retryable_command(command,
+                                           stdin=json.dumps(payload),
+                                           require_output=True)
+    signed_jwt = stdout.decode().strip()
     # Exchange the signed JWT for an access token
     http = Http()
     token_url = "https://oauth2.googleapis.com/token"
@@ -580,10 +575,7 @@ async def get_access_token_via_gcloud(subject, scopes):
     logging.error("Error getting access token without key file: %s", e)
     raise
   finally:
-    if os.path.exists(payload_file):
-      os.remove(payload_file)
-    if os.path.exists(jwt_output_file):
-      os.remove(jwt_output_file)
+    pass
 
 
 def execute_api_request(url, token):

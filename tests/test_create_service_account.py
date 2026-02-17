@@ -120,14 +120,9 @@ class TestCreateServiceAccount(unittest.TestCase):
   @patch('create_service_account.retryable_command',
          new_callable=unittest.mock.AsyncMock)
   @patch('create_service_account.Http.request')
-  @patch('builtins.open',
-         new_callable=unittest.mock.mock_open,
-         read_data="signed_jwt_content")
   @patch('create_service_account.os.path.exists')
-  @patch('create_service_account.os.remove')
-  def test_get_access_token_no_key(self, mock_remove, mock_exists, mock_open,
-                                   mock_request, mock_retryable,
-                                   mock_get_email):
+  def test_get_access_token_no_key(self, mock_exists, mock_request,
+                                   mock_retryable, mock_get_email):
     # Setup mocks
     mock_exists.return_value = False  # KEY_FILE does not exist
     create_service_account.KEY_FILE = "dummy_key.json"
@@ -135,7 +130,7 @@ class TestCreateServiceAccount(unittest.TestCase):
     # Mock get_service_account_email (async)
     mock_get_email.return_value = "tool-service-account@test-project.iam.gserviceaccount.com"
     # Mock retryable_command (async)
-    mock_retryable.return_value = (b"", b"", 0)
+    mock_retryable.return_value = (b"signed_jwt_content", b"", 0)
     # Mock Http request for token exchange
     mock_request.return_value = (unittest.mock.Mock(status=200),
                                  b'{"access_token": "mock_access_token"}')
