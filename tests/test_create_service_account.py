@@ -25,14 +25,28 @@ class TestCreateServiceAccount(unittest.TestCase):
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis=None,
-                              scopes=None)
+                              scopes=None,
+                              no_key=False)
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
     self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY,
                      "Google Workspace Migration for Microsoft Exchange")
     self.assertIn("admin.googleapis.com", create_service_account.APIS)
+    self.assertIn("orgpolicy.googleapis.com", create_service_account.APIS)
     self.assertIn("https://www.googleapis.com/auth/contacts",
                   create_service_account.SCOPES)
+
+  def test_gwmme_config_no_key(self):
+    args = argparse.Namespace(tool="gwmme",
+                              tool_name=None,
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis=None,
+                              scopes=None,
+                              no_key=True)
+    create_service_account.setup_config(args)
+    self.assertIn("admin.googleapis.com", create_service_account.APIS)
+    self.assertNotIn("orgpolicy.googleapis.com", create_service_account.APIS)
 
   def test_gwm_config(self):
     args = argparse.Namespace(tool="gwm",
@@ -40,7 +54,8 @@ class TestCreateServiceAccount(unittest.TestCase):
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis=None,
-                              scopes=None)
+                              scopes=None,
+                              no_key=False)
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "GWM")
     self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY,
@@ -53,7 +68,8 @@ class TestCreateServiceAccount(unittest.TestCase):
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis=None,
-                              scopes=None)
+                              scopes=None,
+                              no_key=False)
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "PasswordSync")
     self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY, "Password Sync")
@@ -64,7 +80,8 @@ class TestCreateServiceAccount(unittest.TestCase):
                               tool_friendly_name="My Custom Tool",
                               help_center_url="https://custom.url",
                               apis="api1,api2.com",
-                              scopes="scope1,https://scope2")
+                              scopes="scope1,https://scope2",
+                              no_key=True)
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "CustomTool")
     self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY,
@@ -77,15 +94,17 @@ class TestCreateServiceAccount(unittest.TestCase):
         create_service_account.SCOPES,
         ["https://www.googleapis.com/auth/scope1", "https://scope2"])
 
-  def test_missing_tool_name_exits(self):
+  @patch('builtins.input', side_effect=['1'])
+  def test_interactive_selection(self, mock_input):
     args = argparse.Namespace(tool=None,
                               tool_name=None,
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis=None,
-                              scopes=None)
-    with self.assertRaises(SystemExit):
-      create_service_account.setup_config(args)
+                              scopes=None,
+                              no_key=False)
+    create_service_account.setup_config(args)
+    self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
 
   def test_api_suffix_logic(self):
     args = argparse.Namespace(tool="gwmme",
@@ -93,7 +112,8 @@ class TestCreateServiceAccount(unittest.TestCase):
                               tool_friendly_name="Test Tool",
                               help_center_url="https://example.com",
                               apis="admin,calendar-json,custom.api.com",
-                              scopes=None)
+                              scopes=None,
+                              no_key=True)
     create_service_account.setup_config(args)
     expected_apis = [
         "admin.googleapis.com", "calendar-json.googleapis.com", "custom.api.com"
@@ -107,7 +127,8 @@ class TestCreateServiceAccount(unittest.TestCase):
         tool_friendly_name="Test Tool",
         help_center_url="https://example.com",
         apis=None,
-        scopes="admin.directory.user,https://www.googleapis.com/auth/calendar")
+        scopes="admin.directory.user,https://www.googleapis.com/auth/calendar",
+        no_key=False)
     create_service_account.setup_config(args)
     expected_scopes = [
         "https://www.googleapis.com/auth/admin.directory.user",

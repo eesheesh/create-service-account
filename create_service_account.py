@@ -50,7 +50,7 @@ TOOL_CONFIGS = {
         "APIS": [
             "admin.googleapis.com", "calendar-json.googleapis.com",
             "contacts.googleapis.com", "gmail.googleapis.com",
-            "groupsmigration.googleapis.com", "orgpolicy.googleapis.com"
+            "groupsmigration.googleapis.com"
         ],
         "SCOPES": [
             "https://www.googleapis.com/auth/contacts",
@@ -75,7 +75,7 @@ TOOL_CONFIGS = {
             "calendar-json.googleapis.com", "drive.googleapis.com",
             "groupsmigration.googleapis.com", "groupssettings.googleapis.com",
             "people.googleapis.com", "sheets.googleapis.com",
-            "tasks.googleapis.com", "orgpolicy.googleapis.com"
+            "tasks.googleapis.com"
         ],
         "SCOPES": [
             "https://www.googleapis.com/auth/contacts",
@@ -105,7 +105,7 @@ TOOL_CONFIGS = {
         "TOOL_NAME": "PasswordSync",
         "TOOL_NAME_FRIENDLY": "Password Sync",
         "TOOL_HELP_CENTER_URL": "https://support.google.com/a/answer/7378726",
-        "APIS": ["admin.googleapis.com", "orgpolicy.googleapis.com"],
+        "APIS": ["admin.googleapis.com"],
         "SCOPES": ["https://www.googleapis.com/auth/admin.directory.user"]
     }
 }
@@ -147,13 +147,28 @@ def parse_arguments():
 def setup_config(args):
   # pylint: disable=global-statement
   global TOOL_NAME, TOOL_NAME_FRIENDLY, TOOL_HELP_CENTER_URL, APIS, SCOPES, USER_AGENT, KEY_FILE
+  if not args.tool and not args.tool_name:
+    print("Select the tool you are using:")
+    tools = list(TOOL_CONFIGS.keys())
+    for i, tool in enumerate(tools):
+      print(f"{i + 1}. {TOOL_CONFIGS[tool]['TOOL_NAME_FRIENDLY']}")
+    while True:
+      try:
+        selection = int(input("Enter the number of your choice: "))
+        if 1 <= selection <= len(tools):
+          args.tool = tools[selection - 1]
+          break
+      except ValueError:
+        pass
+      print("Invalid selection. Please try again.")
+
   if args.tool:
     config = TOOL_CONFIGS[args.tool]
     TOOL_NAME = config["TOOL_NAME"]
     TOOL_NAME_FRIENDLY = config["TOOL_NAME_FRIENDLY"]
     TOOL_HELP_CENTER_URL = config["TOOL_HELP_CENTER_URL"]
-    APIS = config["APIS"]
-    SCOPES = config["SCOPES"]
+    APIS = list(config["APIS"])
+    SCOPES = list(config["SCOPES"])
   if args.tool_name:
     TOOL_NAME = args.tool_name
   if args.tool_friendly_name:
@@ -174,6 +189,13 @@ def setup_config(args):
       if not scope.startswith('https://'):
         scope = 'https://www.googleapis.com/auth/' + scope
       SCOPES.append(scope)
+
+  if not args.no_key:
+    if "orgpolicy.googleapis.com" not in APIS:
+      APIS.append("orgpolicy.googleapis.com")
+  elif "orgpolicy.googleapis.com" in APIS:
+    APIS.remove("orgpolicy.googleapis.com")
+
   if not TOOL_NAME:
     logging.error("TOOL_NAME is not set. Please specify --tool or --tool-name.")
     sys.exit(1)
@@ -363,7 +385,8 @@ async def verify_service_account_authorization():
   while not scopes_are_authorized:
     scope_authorization_failures = []
     for scope in SCOPES:
-      scope_authorized = verify_scope_authorization(admin_user_email, scope)
+      scope_authorized = await verify_scope_authorization(
+          admin_user_email, scope)
       if not scope_authorized:
         scope_authorization_failures.append(scope)
     if scope_authorization_failures:
@@ -738,7 +761,8 @@ async def main():
   await create_project()
   await verify_tos_accepted()
   await enable_apis()
-  await handle_org_policies()
+  if not args.no_key:
+    await handle_org_policies()
   await create_service_account()
   await authorize_service_account()
   if not args.no_key:
