@@ -35,7 +35,6 @@ import pathlib
 import sys
 import time
 import urllib.parse
-import subprocess
 
 from google_auth_httplib2 import Request
 from httplib2 import Http
@@ -765,15 +764,6 @@ async def get_project_id():
     command = "gcloud config get-value project"
     project_id, _, _ = await retryable_command(command, require_output=True)
     return project_id.decode().rstrip()
-
-# Helper for synchronous calls
-
-
-def get_project_id_sync():
-    return subprocess.check_output(
-        ["gcloud", "config", "get-value", "project"],
-        stderr=subprocess.PIPE
-    ).decode().strip()
 
 
 async def get_service_account_id():
