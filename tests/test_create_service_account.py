@@ -185,6 +185,26 @@ class TestCreateServiceAccount(unittest.TestCase):
 
     self.assertTrue(project_id.startswith("p123tool"))
 
+  @patch('create_service_account.Http')
+  def test_http_verbose_logging(self, mock_http):
+    args = argparse.Namespace(tool="gwmme",
+                              tool_name=None,
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis=None,
+                              scopes=None,
+                              no_key=False,
+                              verbose_http=True)
+    # Just need to check if init_logger sets debuglevel
+    # We need to mock logging setup since it does file I/O
+    with patch('create_service_account.logging.basicConfig'), \
+         patch('create_service_account.logging.StreamHandler'), \
+         patch('create_service_account.logging.getLogger'):
+      create_service_account.setup_config(args)
+      create_service_account.init_logger(args)
+      # Http class attribute debuglevel should be 4
+      self.assertEqual(create_service_account.Http.debuglevel, 4)
+
   @patch('create_service_account.get_service_account_email',
          new_callable=AsyncMock)
   @patch('create_service_account.retryable_command',

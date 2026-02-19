@@ -141,6 +141,9 @@ def parse_arguments():
   parser.add_argument('--no-key',
                       action='store_true',
                       help='Skip service account key creation.')
+  parser.add_argument('--verbose-http',
+                      action='store_true',
+                      help='Enable full HTTP request/response logging.')
   return parser.parse_args()
 
 
@@ -494,7 +497,7 @@ async def verify_api_access():
   logging.info("Verifying API access...")
   admin_user_email = await get_admin_user_email()
   project_id = await get_project_id()
-  token = get_access_token_for_scopes(admin_user_email, SCOPES)
+  token = await get_access_token_for_scopes(admin_user_email, SCOPES)
   retry_api_verification = True
   while retry_api_verification:
     disabled_apis = {}
@@ -809,7 +812,7 @@ async def get_organization_id():
   return org_id.decode().rstrip()
 
 
-def init_logger():
+def init_logger(args):
   """Initializes the logger."""
   # Log DEBUG level messages and above to a file
   logging.basicConfig(filename=f"{TOOL_NAME}_create_service_account.log",
@@ -823,12 +826,15 @@ def init_logger():
   console.setFormatter(formatter)
   logging.getLogger("").addHandler(console)
 
+  if args.verbose_http:
+    Http.debuglevel = 4
+
 
 async def main():
   """Main execution function."""
   args = parse_arguments()
   setup_config(args)
-  init_logger()
+  init_logger(args)
   os.system("clear")
   response = input(
       "Welcome! This script will create and authorize the resources that are "
