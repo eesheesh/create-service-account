@@ -39,13 +39,26 @@ class TestCreateServiceAccount(unittest.TestCase):
                   create_service_account.SCOPES)
 
   def test_gwmme_config_no_key(self):
-    # orgpolicy should NOT be removed even if no_key is True
+    # orgpolicy should NOT be added if no_key is True
     args = argparse.Namespace(tool="gwmme",
                               tool_name=None,
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis=None,
                               scopes=None,
+                              no_key=True)
+    create_service_account.setup_config(args)
+    self.assertIn("admin.googleapis.com", create_service_account.APIS)
+    self.assertNotIn("orgpolicy.googleapis.com", create_service_account.APIS)
+
+  def test_orgpolicy_kept_if_explicit_with_no_key(self):
+    # orgpolicy should be kept if explicit, even if no_key is True
+    args = argparse.Namespace(tool=None,
+                              tool_name="MyTool",
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis="admin,orgpolicy",
+                              scopes="scope1",
                               no_key=True)
     create_service_account.setup_config(args)
     self.assertIn("admin.googleapis.com", create_service_account.APIS)
@@ -130,14 +143,23 @@ class TestCreateServiceAccount(unittest.TestCase):
 
     # Check the command passed to retryable_command
     call_args = mock_retryable.call_args[0][0]
-    match = re.search(r"--name '([^']+)'", call_args)
-    self.assertTrue(match, "Could not find --name argument in command")
-    project_name = match.group(1)
+    match_name = re.search(r"--name '([^']+)'", call_args)
+    self.assertTrue(match_name, "Could not find --name argument in command")
+    project_name = match_name.group(1)
 
     # Max length is 30
     self.assertLessEqual(len(project_name), 30)
     # Suffix is 16 chars (-YYYYMMDD-HHMMSS), so prefix should be 14
     self.assertTrue(project_name.startswith("ThisIsAVeryLon-"))
+
+    # Check Project ID
+    match_id = re.search(r"gcloud projects create ([^ ]+)", call_args)
+    self.assertTrue(match_id, "Could not find project ID in command")
+    project_id = match_id.group(1)
+
+    self.assertLessEqual(len(project_id), 30)
+    # Project ID lowercased
+    self.assertTrue(project_id.startswith("thisisaverylon-"))
 
   @patch('create_service_account.get_service_account_email',
          new_callable=AsyncMock)

@@ -214,7 +214,7 @@ def setup_config(args):
         scope = 'https://www.googleapis.com/auth/' + scope
       SCOPES.append(scope)
 
-  if "orgpolicy.googleapis.com" not in APIS:
+  if not args.no_key and "orgpolicy.googleapis.com" not in APIS:
     APIS.append("orgpolicy.googleapis.com")
 
   if "admin.googleapis.com" in APIS:
@@ -256,15 +256,8 @@ async def create_project():
   """Creates a new GCP project."""
   logging.info("Creating project...")
 
-  # Sanitize TOOL_NAME for Project ID (lowercase, alphanumeric, hyphen)
-  # Project IDs must start with a letter, end with letter or digit, 6-30 chars.
-  # We assume TOOL_NAME has at least some valid chars.
-  # This is a best-effort sanitization for ID.
-  safe_name_for_id = re.sub(r"[^a-z0-9]", "-", TOOL_NAME.lower())
-  project_id = f"{safe_name_for_id}-{int(time.time() * 1000)}"
-
-  # Create Project Name (Display Name)
-  # Max length 30.
+  # Create Project Name (Display Name) and Project ID
+  # Max length 30 for both.
   # Format: "{TOOL_NAME}-{timestamp}"
   # Timestamp format: %Y%m%d-%H%M%S (15 chars) + hyphen = 16 chars.
   # Available for TOOL_NAME: 30 - 16 = 14 chars.
@@ -272,6 +265,12 @@ async def create_project():
   max_tool_name_len = 30 - len(suffix)
   truncated_tool_name = TOOL_NAME[:max_tool_name_len]
   project_name = f"{truncated_tool_name}{suffix}"
+
+  # Project ID: same constraints (30 chars), but stricter chars.
+  # We'll use the truncated name, lowercased, spaces to hyphens.
+  project_id_base = truncated_tool_name.lower().replace(
+      ' ', '-').replace("'", "").replace("!", "")
+  project_id = f"{project_id_base}{suffix}"
 
   await retryable_command(f"gcloud projects create {project_id} "
                           f"--name '{project_name}' --set-as-default")
