@@ -114,19 +114,22 @@ class TestCreateServiceAccount(unittest.TestCase):
                      "the documentation for MyTool")
 
   def test_invalid_tool_name_validation(self):
-    args = argparse.Namespace(tool=None,
-                              tool_name="Bad@Name",
-                              tool_friendly_name=None,
-                              help_center_url=None,
-                              apis=None,
-                              scopes=None,
-                              no_key=False)
-    with self.assertRaises(SystemExit):
-      create_service_account.setup_config(args)
+    # Spaces, quotes, exclamation marks are now invalid
+    invalid_names = ["Bad@Name", "Good Name", "Name!", "Name'"]
+    for name in invalid_names:
+        args = argparse.Namespace(tool=None,
+                                  tool_name=name,
+                                  tool_friendly_name=None,
+                                  help_center_url=None,
+                                  apis=None,
+                                  scopes=None,
+                                  no_key=False)
+        with self.assertRaises(SystemExit):
+          create_service_account.setup_config(args)
 
   def test_valid_tool_name_validation(self):
     args = argparse.Namespace(tool=None,
-                              tool_name="Good-Name' 123!",
+                              tool_name="Good-Name-123",
                               tool_friendly_name=None,
                               help_center_url=None,
                               apis="admin",
@@ -134,7 +137,7 @@ class TestCreateServiceAccount(unittest.TestCase):
                               no_key=False)
     # Should not raise
     create_service_account.setup_config(args)
-    self.assertEqual(create_service_account.TOOL_NAME, "Good-Name' 123!")
+    self.assertEqual(create_service_account.TOOL_NAME, "Good-Name-123")
 
   @patch('create_service_account.retryable_command', new_callable=AsyncMock)
   def test_project_name_truncation(self, mock_retryable):
@@ -160,6 +163,27 @@ class TestCreateServiceAccount(unittest.TestCase):
     self.assertLessEqual(len(project_id), 30)
     # Project ID lowercased
     self.assertTrue(project_id.startswith("thisisaverylon-"))
+
+  @patch('create_service_account.retryable_command', new_callable=AsyncMock)
+  def test_project_name_starts_with_letter(self, mock_retryable):
+    create_service_account.TOOL_NAME = "123Tool"
+    asyncio.run(create_service_account.create_project())
+
+    # Check the command passed to retryable_command
+    call_args = mock_retryable.call_args[0][0]
+    match_name = re.search(r"--name '([^']+)'", call_args)
+    self.assertTrue(match_name, "Could not find --name argument in command")
+    project_name = match_name.group(1)
+
+    # Should start with 'p' prepended
+    self.assertTrue(project_name.startswith("p123Tool"))
+
+    # Check Project ID
+    match_id = re.search(r"gcloud projects create ([^ ]+)", call_args)
+    self.assertTrue(match_id, "Could not find project ID in command")
+    project_id = match_id.group(1)
+
+    self.assertTrue(project_id.startswith("p123tool"))
 
   @patch('create_service_account.get_service_account_email',
          new_callable=AsyncMock)

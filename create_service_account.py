@@ -175,7 +175,8 @@ def setup_config(args):
           break
       except ValueError:
         pass
-      print("Invalid selection. Please try again.")
+      print(f"Invalid selection. Please enter a number between 1 and "
+            f"{len(tools)}.")
 
   if tool_key:
     config = TOOL_CONFIGS[tool_key]
@@ -218,6 +219,8 @@ def setup_config(args):
     APIS.append("orgpolicy.googleapis.com")
 
   if "admin.googleapis.com" in APIS:
+    # admin.googleapis.com needs to be first for the ToS validation to work as
+    # expected.
     APIS.remove("admin.googleapis.com")
     APIS.insert(0, "admin.googleapis.com")
 
@@ -226,23 +229,16 @@ def setup_config(args):
     sys.exit(1)
 
   # Validate TOOL_NAME
-  # Allowed: letters, numbers, single quotes, hyphens, spaces, exclamation pts.
-  pattern = r"^[a-zA-Z0-9'\- !]+$"
-  match = re.match(pattern, TOOL_NAME)
-  if not match:
+  # Allowed: letters, numbers, hyphens.
+  match = re.search(r"[^a-zA-Z0-9-]", TOOL_NAME)
+  if match:
     # Find the invalid character
-    invalid_char = ""
-    index = -1
-    for i, char in enumerate(TOOL_NAME):
-      if not re.match(r"[a-zA-Z0-9'\- !]", char):
-        invalid_char = char
-        index = i
-        break
+    invalid_char = match.group(0)
+    index = match.start()
     logging.error("TOOL_NAME contains invalid characters.")
     print(f"\nError: The tool name '{TOOL_NAME}' contains an invalid "
           f"character '{invalid_char}' at position {index}.")
-    print("Allowed characters are: letters, numbers, single quotes, hyphens, "
-          "spaces, or exclamation points.")
+    print("Allowed characters are: letters, numbers, and hyphens.")
     sys.exit(1)
 
   USER_AGENT = f"{TOOL_NAME}_create_service_account_v{VERSION}"
@@ -260,17 +256,24 @@ async def create_project():
   # Max length 30 for both.
   # Format: "{TOOL_NAME}-{timestamp}"
   # Timestamp format: %Y%m%d-%H%M%S (15 chars) + hyphen = 16 chars.
-  # Available for TOOL_NAME: 30 - 16 = 14 chars.
   suffix = f"-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
-  max_tool_name_len = 30 - len(suffix)
-  truncated_tool_name = TOOL_NAME[:max_tool_name_len]
-  project_name = f"{truncated_tool_name}{suffix}"
 
-  # Project ID: same constraints (30 chars), but stricter chars.
-  # We'll use the truncated name, lowercased, spaces to hyphens.
-  project_id_base = truncated_tool_name.lower().replace(
-      ' ', '-').replace("'", "").replace("!", "")
-  project_id = f"{project_id_base}{suffix}"
+  if not TOOL_NAME[0].isalpha():
+    prefix = "p" + TOOL_NAME
+  else:
+    prefix = TOOL_NAME
+
+  # Available for TOOL_NAME: 30 - 16 = 14 chars.
+  # If TOOL_NAME doesn't start with a letter, we prepend 'p', taking 1 char.
+  # So available for TOOL_NAME: 13 chars in that case.
+  max_prefix_len = 30 - len(suffix)
+  truncated_prefix = prefix[:max_prefix_len]
+  project_name = f"{truncated_prefix}{suffix}"
+
+  # Project ID: same constraints (30 chars).
+  # Since TOOL_NAME is restricted to [a-zA-Z0-9-], and we handle the start char,
+  # we just lowercase it.
+  project_id = project_name.lower()
 
   await retryable_command(f"gcloud projects create {project_id} "
                           f"--name '{project_name}' --set-as-default")
