@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 import urllib.parse
@@ -127,11 +128,10 @@ CREATE_OAUTH_WEB_CLIENT_ID_URL = (
 
 
 def parse_arguments():
+  """Parses command-line arguments."""
   parser = argparse.ArgumentParser(
       description='Create service account for Google Workspace tools.')
-  parser.add_argument('--tool',
-                      choices=TOOL_CONFIGS.keys(),
-                      help='Tool to configure settings for.')
+  parser.add_argument('--tool', help='Tool to configure settings for.')
   parser.add_argument('--tool-name', help='Name of the tool.')
   parser.add_argument('--tool-friendly-name', help='Friendly name of the tool.')
   parser.add_argument('--help-center-url', help='Help center URL.')
@@ -145,9 +145,23 @@ def parse_arguments():
 
 
 def setup_config(args):
+  """Sets up the configuration for the script."""
   # pylint: disable=global-statement
   global TOOL_NAME, TOOL_NAME_FRIENDLY, TOOL_HELP_CENTER_URL, APIS, SCOPES, USER_AGENT, KEY_FILE
-  if not args.tool and not args.tool_name:
+
+  # Normalize args.tool to lowercase for lookup, but only if it's in configs.
+  # If the user passed something random like "MyTool", we might want to let them
+  # proceed if they provided tool-name etc., or we fall back.
+
+  tool_key = None
+  if args.tool:
+    if args.tool.lower() in TOOL_CONFIGS:
+      tool_key = args.tool.lower()
+    else:
+      print(f"Tool '{args.tool}' not found in presets.")
+      # tool_key remains None, so we trigger selection below
+
+  if not tool_key and not args.tool_name:
     print("Select the tool you are using:")
     tools = list(TOOL_CONFIGS.keys())
     for i, tool in enumerate(tools):
@@ -156,25 +170,35 @@ def setup_config(args):
       try:
         selection = int(input("Enter the number of your choice: "))
         if 1 <= selection <= len(tools):
-          args.tool = tools[selection - 1]
+          tool_key = tools[selection - 1]
+          args.tool = tool_key
           break
       except ValueError:
         pass
       print("Invalid selection. Please try again.")
 
-  if args.tool:
-    config = TOOL_CONFIGS[args.tool]
+  if tool_key:
+    config = TOOL_CONFIGS[tool_key]
     TOOL_NAME = config["TOOL_NAME"]
     TOOL_NAME_FRIENDLY = config["TOOL_NAME_FRIENDLY"]
     TOOL_HELP_CENTER_URL = config["TOOL_HELP_CENTER_URL"]
     APIS = list(config["APIS"])
     SCOPES = list(config["SCOPES"])
+
+  # Override with specific arguments if provided
   if args.tool_name:
     TOOL_NAME = args.tool_name
   if args.tool_friendly_name:
     TOOL_NAME_FRIENDLY = args.tool_friendly_name
   if args.help_center_url:
     TOOL_HELP_CENTER_URL = args.help_center_url
+
+  # Apply defaults if still not set
+  if not TOOL_NAME_FRIENDLY:
+    TOOL_NAME_FRIENDLY = TOOL_NAME
+  if not TOOL_HELP_CENTER_URL:
+    TOOL_HELP_CENTER_URL = f"the documentation for {TOOL_NAME_FRIENDLY}"
+
   if args.apis:
     APIS = []
     for api in args.apis.split(','):
@@ -190,31 +214,72 @@ def setup_config(args):
         scope = 'https://www.googleapis.com/auth/' + scope
       SCOPES.append(scope)
 
-  if not args.no_key:
-    if "orgpolicy.googleapis.com" not in APIS:
-      APIS.append("orgpolicy.googleapis.com")
-  elif "orgpolicy.googleapis.com" in APIS:
-    APIS.remove("orgpolicy.googleapis.com")
+  if "orgpolicy.googleapis.com" not in APIS:
+    APIS.append("orgpolicy.googleapis.com")
+
+  if "admin.googleapis.com" in APIS:
+    APIS.remove("admin.googleapis.com")
+    APIS.insert(0, "admin.googleapis.com")
 
   if not TOOL_NAME:
     logging.error("TOOL_NAME is not set. Please specify --tool or --tool-name.")
     sys.exit(1)
+
+  # Validate TOOL_NAME
+  # Allowed: letters, numbers, single quotes, hyphens, spaces, exclamation pts.
+  pattern = r"^[a-zA-Z0-9'\- !]+$"
+  match = re.match(pattern, TOOL_NAME)
+  if not match:
+    # Find the invalid character
+    invalid_char = ""
+    index = -1
+    for i, char in enumerate(TOOL_NAME):
+      if not re.match(r"[a-zA-Z0-9'\- !]", char):
+        invalid_char = char
+        index = i
+        break
+    logging.error("TOOL_NAME contains invalid characters.")
+    print(f"\nError: The tool name '{TOOL_NAME}' contains an invalid "
+          f"character '{invalid_char}' at position {index}.")
+    print("Allowed characters are: letters, numbers, single quotes, hyphens, "
+          "spaces, or exclamation points.")
+    sys.exit(1)
+
   USER_AGENT = f"{TOOL_NAME}_create_service_account_v{VERSION}"
-  KEY_FILE = (f"{pathlib.Path.home()}/{TOOL_NAME.lower()}-service-account-key-"
-              f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.json")
+  KEY_FILE = (
+      f"{pathlib.Path.home()}/{TOOL_NAME.lower().replace(' ', '-')}"
+      f"-service-account-key-"
+      f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.json")
 
 
 async def create_project():
+  """Creates a new GCP project."""
   logging.info("Creating project...")
-  project_id = f"{TOOL_NAME.lower()}-{int(time.time() * 1000)}"
-  project_name = (f"{TOOL_NAME}-"
-                  f"{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}")
+
+  # Sanitize TOOL_NAME for Project ID (lowercase, alphanumeric, hyphen)
+  # Project IDs must start with a letter, end with letter or digit, 6-30 chars.
+  # We assume TOOL_NAME has at least some valid chars.
+  # This is a best-effort sanitization for ID.
+  safe_name_for_id = re.sub(r"[^a-z0-9]", "-", TOOL_NAME.lower())
+  project_id = f"{safe_name_for_id}-{int(time.time() * 1000)}"
+
+  # Create Project Name (Display Name)
+  # Max length 30.
+  # Format: "{TOOL_NAME}-{timestamp}"
+  # Timestamp format: %Y%m%d-%H%M%S (15 chars) + hyphen = 16 chars.
+  # Available for TOOL_NAME: 30 - 16 = 14 chars.
+  suffix = f"-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+  max_tool_name_len = 30 - len(suffix)
+  truncated_tool_name = TOOL_NAME[:max_tool_name_len]
+  project_name = f"{truncated_tool_name}{suffix}"
+
   await retryable_command(f"gcloud projects create {project_id} "
-                          f"--name {project_name} --set-as-default")
+                          f"--name '{project_name}' --set-as-default")
   logging.info("%s successfully created \u2705", project_id)
 
 
 async def verify_tos_accepted():
+  """Verifies that the Terms of Service are accepted."""
   logging.info("Verifying acceptance of Terms of service...")
   tos_accepted = False
   while APIS and not tos_accepted:
@@ -250,6 +315,7 @@ async def verify_tos_accepted():
 
 
 async def enable_apis():
+  """Enables the required APIs."""
   logging.info("Enabling APIs...")
   # verify_tos_accepted checks the first API, so skip it here.
   enable_api_calls = map(enable_api, APIS[1:])
@@ -320,12 +386,12 @@ async def handle_org_policies():
     for policy in enforced_policies:
       if policy.startswith("iam.managed"):
         command = "gcloud org-policies set-policy /dev/stdin"
-        stdin_text = (f"""
+        stdin_text = f"""
 name: projects/{project_id}/policies/{policy}
 spec:
  rules:
   - enforce: false
-""")
+"""
       else:
         command = (f"gcloud resource-manager org-policies disable-enforce "
                    f"{policy} --project={project_id}")
@@ -345,8 +411,9 @@ spec:
 
 
 async def create_service_account():
+  """Creates a new service account."""
   logging.info("Creating service account...")
-  service_account_name = f"{TOOL_NAME.lower()}-service-account"
+  service_account_name = f"{TOOL_NAME.lower().replace(' ', '-')}-service-account"
   service_account_display_name = f"{TOOL_NAME} Service Account"
   await retryable_command(f"gcloud iam service-accounts create "
                           f"{service_account_name} --display-name "
@@ -355,6 +422,7 @@ async def create_service_account():
 
 
 async def create_service_account_key():
+  """Creates a key for the service account."""
   logging.info("Creating service account key...")
   service_account_email = await get_service_account_email()
   # Allowing for a long set of retries because if the org policies on the
@@ -368,6 +436,7 @@ async def create_service_account_key():
 
 
 async def authorize_service_account():
+  """Prompts the user to authorize the service account."""
   service_account_id = await get_service_account_id()
   scopes = urllib.parse.quote(",".join(SCOPES), safe="")
   authorize_url = DWD_URL_FORMAT.format(service_account_id, scopes)
@@ -378,6 +447,7 @@ async def authorize_service_account():
 
 
 async def verify_service_account_authorization():
+  """Verifies that the service account is authorized."""
   logging.info("Verifying service account authorization...")
   admin_user_email = await get_admin_user_email()
   service_account_id = await get_service_account_id()
@@ -417,6 +487,7 @@ async def verify_service_account_authorization():
 
 
 async def verify_api_access():
+  """Verifies access to the enabled APIs."""
   # pylint: disable=too-many-locals, too-many-branches, too-many-statements
   logging.info("Verifying API access...")
   admin_user_email = await get_admin_user_email()
@@ -434,8 +505,8 @@ async def verify_api_access():
         # Admin SDK does not have a corresponding service.
         api_name = "Admin SDK"
         raw_api_response = execute_api_request(
-            f"https://admin.googleapis.com/admin/directory/v1/users/{admin_user_email}?fields=isAdmin",
-            token)
+            f"https://admin.googleapis.com/admin/directory/v1/users/"
+            f"{admin_user_email}?fields=isAdmin", token)
       if api == "calendar-json.googleapis.com":
         api_name = service_name = "Calendar"
         raw_api_response = execute_api_request(
@@ -451,8 +522,8 @@ async def verify_api_access():
         # People (Contacts) does not have a corresponding service.
         api_name = "People"
         raw_api_response = execute_api_request(
-            "https://people.googleapis.com/v1/people/me/connections?pageSize=1&personFields=metadata",
-            token)
+            "https://people.googleapis.com/v1/people/me/connections?"
+            "pageSize=1&personFields=metadata", token)
       if api == "drive.googleapis.com":
         api_name = service_name = "Drive"
         raw_api_response = execute_api_request(
@@ -505,23 +576,27 @@ async def verify_api_access():
 
 
 async def download_service_account_key():
+  """Downloads the service account key."""
   command = f"cloudshell download {KEY_FILE}"
   await retryable_command(command)
 
 
 async def delete_key():
+  """Deletes the service account key file."""
   input("\nPress Enter after you have downloaded the file.")
-  logging.debug(f"Deleting key file ${KEY_FILE}...")
+  logging.debug("Deleting key file %s...", KEY_FILE)
   command = f"shred -u {KEY_FILE}"
   await retryable_command(command)
 
 
 async def enable_api(api):
+  """Enables a single API."""
   command = f"gcloud services enable {api}"
   await retryable_command(command)
 
 
 async def verify_scope_authorization(subject, scope):
+  """Verifies authorization for a specific scope."""
   try:
     await get_access_token_for_scopes(subject, [scope])
     return True
@@ -535,6 +610,7 @@ async def verify_scope_authorization(subject, scope):
 
 
 async def get_access_token_for_scopes(subject, scopes):
+  """Obtains an access token for the given scopes."""
   logging.debug("Getting access token for scopes %s, user %s", scopes, subject)
   if os.path.exists(KEY_FILE):
     credentials = service_account.Credentials.from_service_account_file(
@@ -544,11 +620,11 @@ async def get_access_token_for_scopes(subject, scopes):
     delegated_credentials.refresh(request)
     logging.debug("Successfully obtained access token")
     return delegated_credentials.token
-  else:
-    return await get_access_token_via_gcloud(subject, scopes)
+  return await get_access_token_via_gcloud(subject, scopes)
 
 
 async def get_access_token_via_gcloud(subject, scopes):
+  """Obtains an access token using gcloud to sign a JWT."""
   # If no key file exists (e.g. --no-key was used), create a signed JWT
   # using gcloud and exchange it for an access token.
   service_account_email = await get_service_account_email()
@@ -602,6 +678,7 @@ async def get_access_token_via_gcloud(subject, scopes):
 
 
 def execute_api_request(url, token):
+  """Executes a GET request to the given API URL."""
   try:
     http = Http()
     headers = {
@@ -620,6 +697,7 @@ def execute_api_request(url, token):
 
 
 def is_api_disabled(raw_api_response):
+  """Checks if the API response indicates the API is disabled."""
   if raw_api_response is None:
     return True
   try:
@@ -631,6 +709,7 @@ def is_api_disabled(raw_api_response):
 
 
 def is_service_disabled(raw_api_response):
+  """Checks if the API response indicates the service is disabled."""
   if raw_api_response is None:
     return True
   try:
@@ -655,6 +734,7 @@ async def retryable_command(command,
                             suppress_errors=False,
                             require_output=False,
                             stdin=None):
+  """Executes a shell command with retries."""
   num_tries = 1
   while num_tries <= max_num_retries:
     logging.debug("Executing command (attempt %d): %s", num_tries, command)
@@ -691,12 +771,14 @@ async def retryable_command(command,
 
 
 async def get_project_id():
+  """Gets the current project ID."""
   command = "gcloud config get-value project"
   project_id, _, _ = await retryable_command(command, require_output=True)
   return project_id.decode().rstrip()
 
 
 async def get_service_account_id():
+  """Gets the service account ID."""
   command = 'gcloud iam service-accounts list --format="value(uniqueId)"'
   service_account_id, _, _ = await retryable_command(command,
                                                      require_output=True)
@@ -704,6 +786,7 @@ async def get_service_account_id():
 
 
 async def get_service_account_email():
+  """Gets the service account email."""
   command = 'gcloud iam service-accounts list --format="value(email)"'
   service_account_email, _, _ = await retryable_command(command,
                                                         require_output=True)
@@ -711,18 +794,21 @@ async def get_service_account_email():
 
 
 async def get_admin_user_email():
+  """Gets the admin user email."""
   command = 'gcloud auth list --format="value(account)"'
   admin_user_email, _, _ = await retryable_command(command, require_output=True)
   return admin_user_email.decode().rstrip()
 
 
 async def get_organization_id():
+  """Gets the organization ID."""
   command = 'gcloud organizations list --format="value(ID)"'
   org_id, _, _ = await retryable_command(command, require_output=True)
   return org_id.decode().rstrip()
 
 
 def init_logger():
+  """Initializes the logger."""
   # Log DEBUG level messages and above to a file
   logging.basicConfig(filename=f"{TOOL_NAME}_create_service_account.log",
                       format="[%(asctime)s][%(levelname)s] %(message)s",
@@ -737,6 +823,7 @@ def init_logger():
 
 
 async def main():
+  """Main execution function."""
   args = parse_arguments()
   setup_config(args)
   init_logger()

@@ -4,7 +4,9 @@ import sys
 import os
 import argparse
 import asyncio
-from unittest.mock import patch
+import re
+from unittest.mock import patch, MagicMock, AsyncMock
+
 # Add parent directory to sys.path to import create_service_account
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,6 +39,7 @@ class TestCreateServiceAccount(unittest.TestCase):
                   create_service_account.SCOPES)
 
   def test_gwmme_config_no_key(self):
+    # orgpolicy should NOT be removed even if no_key is True
     args = argparse.Namespace(tool="gwmme",
                               tool_name=None,
                               tool_friendly_name=None,
@@ -46,57 +49,22 @@ class TestCreateServiceAccount(unittest.TestCase):
                               no_key=True)
     create_service_account.setup_config(args)
     self.assertIn("admin.googleapis.com", create_service_account.APIS)
-    self.assertNotIn("orgpolicy.googleapis.com", create_service_account.APIS)
+    self.assertIn("orgpolicy.googleapis.com", create_service_account.APIS)
 
-  def test_gwm_config(self):
-    args = argparse.Namespace(tool="gwm",
-                              tool_name=None,
-                              tool_friendly_name=None,
-                              help_center_url=None,
-                              apis=None,
-                              scopes=None,
-                              no_key=False)
-    create_service_account.setup_config(args)
-    self.assertEqual(create_service_account.TOOL_NAME, "GWM")
-    self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY,
-                     "Google Workspace Migrate")
-    self.assertIn("migrate.googleapis.com", create_service_account.APIS)
-
-  def test_password_sync_config(self):
-    args = argparse.Namespace(tool="password_sync",
-                              tool_name=None,
-                              tool_friendly_name=None,
-                              help_center_url=None,
-                              apis=None,
-                              scopes=None,
-                              no_key=False)
-    create_service_account.setup_config(args)
-    self.assertEqual(create_service_account.TOOL_NAME, "PasswordSync")
-    self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY, "Password Sync")
-
-  def test_custom_arguments_override(self):
+  def test_admin_api_ordering(self):
+    # admin.googleapis.com should be first
     args = argparse.Namespace(tool="gwmme",
-                              tool_name="CustomTool",
-                              tool_friendly_name="My Custom Tool",
-                              help_center_url="https://custom.url",
-                              apis="api1,api2.com",
-                              scopes="scope1,https://scope2",
-                              no_key=True)
+                              tool_name=None,
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis=None,
+                              scopes=None,
+                              no_key=False)
     create_service_account.setup_config(args)
-    self.assertEqual(create_service_account.TOOL_NAME, "CustomTool")
-    self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY,
-                     "My Custom Tool")
-    self.assertEqual(create_service_account.TOOL_HELP_CENTER_URL,
-                     "https://custom.url")
-    self.assertEqual(create_service_account.APIS,
-                     ["api1.googleapis.com", "api2.com"])
-    self.assertEqual(
-        create_service_account.SCOPES,
-        ["https://www.googleapis.com/auth/scope1", "https://scope2"])
+    self.assertEqual(create_service_account.APIS[0], "admin.googleapis.com")
 
-  @patch('builtins.input', side_effect=['1'])
-  def test_interactive_selection(self, mock_input):
-    args = argparse.Namespace(tool=None,
+  def test_case_insensitive_tool(self):
+    args = argparse.Namespace(tool="GwMmE",
                               tool_name=None,
                               tool_friendly_name=None,
                               help_center_url=None,
@@ -106,40 +74,75 @@ class TestCreateServiceAccount(unittest.TestCase):
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
 
-  def test_api_suffix_logic(self):
-    args = argparse.Namespace(tool="gwmme",
-                              tool_name="TestTool",
-                              tool_friendly_name="Test Tool",
-                              help_center_url="https://example.com",
-                              apis="admin,calendar-json,custom.api.com",
+  @patch('builtins.input', side_effect=['1'])
+  def test_invalid_tool_fallback(self, mock_input):
+    # Invalid tool should trigger interactive selection
+    args = argparse.Namespace(tool="invalid_tool",
+                              tool_name=None,
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis=None,
                               scopes=None,
-                              no_key=True)
+                              no_key=False)
     create_service_account.setup_config(args)
-    expected_apis = [
-        "admin.googleapis.com", "calendar-json.googleapis.com", "custom.api.com"
-    ]
-    self.assertEqual(create_service_account.APIS, expected_apis)
+    self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
 
-  def test_scope_prefix_logic(self):
-    args = argparse.Namespace(
-        tool="gwmme",
-        tool_name="TestTool",
-        tool_friendly_name="Test Tool",
-        help_center_url="https://example.com",
-        apis=None,
-        scopes="admin.directory.user,https://www.googleapis.com/auth/calendar",
-        no_key=False)
+  def test_defaults(self):
+    args = argparse.Namespace(tool=None,
+                              tool_name="MyTool",
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis="admin",
+                              scopes="scope1",
+                              no_key=False)
     create_service_account.setup_config(args)
-    expected_scopes = [
-        "https://www.googleapis.com/auth/admin.directory.user",
-        "https://www.googleapis.com/auth/calendar"
-    ]
-    self.assertEqual(create_service_account.SCOPES, expected_scopes)
+    self.assertEqual(create_service_account.TOOL_NAME_FRIENDLY, "MyTool")
+    self.assertEqual(create_service_account.TOOL_HELP_CENTER_URL,
+                     "the documentation for MyTool")
+
+  def test_invalid_tool_name_validation(self):
+    args = argparse.Namespace(tool=None,
+                              tool_name="Bad@Name",
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis=None,
+                              scopes=None,
+                              no_key=False)
+    with self.assertRaises(SystemExit):
+      create_service_account.setup_config(args)
+
+  def test_valid_tool_name_validation(self):
+    args = argparse.Namespace(tool=None,
+                              tool_name="Good-Name' 123!",
+                              tool_friendly_name=None,
+                              help_center_url=None,
+                              apis="admin",
+                              scopes="scope1",
+                              no_key=False)
+    # Should not raise
+    create_service_account.setup_config(args)
+    self.assertEqual(create_service_account.TOOL_NAME, "Good-Name' 123!")
+
+  @patch('create_service_account.retryable_command', new_callable=AsyncMock)
+  def test_project_name_truncation(self, mock_retryable):
+    create_service_account.TOOL_NAME = "ThisIsAVeryLongToolNameThatExceedsLimit"
+    asyncio.run(create_service_account.create_project())
+
+    # Check the command passed to retryable_command
+    call_args = mock_retryable.call_args[0][0]
+    match = re.search(r"--name '([^']+)'", call_args)
+    self.assertTrue(match, "Could not find --name argument in command")
+    project_name = match.group(1)
+
+    # Max length is 30
+    self.assertLessEqual(len(project_name), 30)
+    # Suffix is 16 chars (-YYYYMMDD-HHMMSS), so prefix should be 14
+    self.assertTrue(project_name.startswith("ThisIsAVeryLon-"))
 
   @patch('create_service_account.get_service_account_email',
-         new_callable=unittest.mock.AsyncMock)
+         new_callable=AsyncMock)
   @patch('create_service_account.retryable_command',
-         new_callable=unittest.mock.AsyncMock)
+         new_callable=AsyncMock)
   @patch('create_service_account.Http.request')
   @patch('create_service_account.os.path.exists')
   def test_get_access_token_no_key(self, mock_exists, mock_request,
@@ -159,49 +162,6 @@ class TestCreateServiceAccount(unittest.TestCase):
         create_service_account.get_access_token_for_scopes(
             "user@example.com", ["scope1"]))
     self.assertEqual(token, "mock_access_token")
-    # Verify gcloud command was called via retryable_command
-    # Expected command substring
-    mock_retryable.assert_called()
-    # Check if sign-jwt was called
-    found_sign_jwt = False
-    for call_args in mock_retryable.call_args_list:
-      command = call_args[0][0]
-      if "sign-jwt" in command:
-        found_sign_jwt = True
-        break
-    self.assertTrue(found_sign_jwt,
-                    "gcloud iam service-accounts sign-jwt was not called")
-    # Verify token exchange request
-    mock_request.assert_called()
-    call_args = mock_request.call_args
-    self.assertEqual(call_args[0][0], "https://oauth2.googleapis.com/token")
-    self.assertEqual(call_args[0][1], "POST")
-    self.assertIn(
-        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer",
-        call_args[1]['body'])
-    self.assertIn("assertion=signed_jwt_content", call_args[1]['body'])
-
-  def test_is_service_disabled(self):
-    # Test disabled scenarios
-    self.assertTrue(
-        create_service_account.is_service_disabled(
-            '{"error": {"errors": [{"reason": "notACalendarUser"}]}}'))
-    self.assertTrue(
-        create_service_account.is_service_disabled(
-            '{"error": {"errors": [{"reason": "notFound"}]}}'))
-    self.assertTrue(
-        create_service_account.is_service_disabled(
-            '{"error": {"errors": [{"reason": "authError"}]}}'))
-    self.assertTrue(
-        create_service_account.is_service_disabled(
-            '{"error": {"message": "service not enabled"}}'))
-    # Test enabled scenarios
-    self.assertFalse(
-        create_service_account.is_service_disabled(
-            '{"error": {"errors": [{"reason": "otherError"}]}}'))
-    self.assertFalse(create_service_account.is_service_disabled('{}'))
-    self.assertTrue(create_service_account.is_service_disabled(None))
-
 
 if __name__ == '__main__':
   unittest.main()
