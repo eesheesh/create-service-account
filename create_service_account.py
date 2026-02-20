@@ -23,16 +23,17 @@ required for obtaining a service account key. Specifically, this script will:
 6. Create and download a service account key
 """
 import argparse
-import asyncio
 import datetime
 import json
 import logging
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
+import concurrent.futures
 from google_auth_httplib2 import Request
 from httplib2 import Http
 from google.auth.exceptions import RefreshError
@@ -149,7 +150,7 @@ def parse_arguments():
 
 def setup_config(args):
   """Sets up the configuration for the script."""
-  # pylint: disable=global-statement
+  # pylint: disable=global-statement, too-many-branches, too-many-statements
   global TOOL_NAME, TOOL_NAME_FRIENDLY, TOOL_HELP_CENTER_URL, APIS, SCOPES, USER_AGENT, KEY_FILE
 
   # Normalize args.tool to lowercase for lookup, but only if it's in configs.
@@ -246,12 +247,12 @@ def setup_config(args):
 
   USER_AGENT = f"{TOOL_NAME}_create_service_account_v{VERSION}"
   KEY_FILE = (
-      f"{pathlib.Path.home()}/{TOOL_NAME.lower().replace(' ', '-')}"
+      f"{pathlib.Path.home()}/{TOOL_NAME.lower()}"
       f"-service-account-key-"
       f"{datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}.json")
 
 
-async def create_project():
+def create_project():
   """Creates a new GCP project."""
   logging.info("Creating project...")
 
@@ -278,20 +279,20 @@ async def create_project():
   # we just lowercase it.
   project_id = project_name.lower()
 
-  await retryable_command(f"gcloud projects create {project_id} "
-                          f"--name '{project_name}' --set-as-default")
+  retryable_command(f"gcloud projects create {project_id} "
+                    f"--name '{project_name}' --set-as-default")
   logging.info("%s successfully created \u2705", project_id)
 
 
-async def verify_tos_accepted():
+def verify_tos_accepted():
   """Verifies that the Terms of Service are accepted."""
   logging.info("Verifying acceptance of Terms of service...")
   tos_accepted = False
   while APIS and not tos_accepted:
     command = f"gcloud services enable {APIS[0]}"
-    _, stderr, return_code = await retryable_command(command,
-                                                     max_num_retries=1,
-                                                     suppress_errors=True)
+    _, stderr, return_code = retryable_command(command,
+                                               max_num_retries=1,
+                                               suppress_errors=True)
     if return_code:
       err_str = stderr.decode()
       if "UREQ_TOS_NOT_ACCEPTED" in err_str:
@@ -319,20 +320,21 @@ async def verify_tos_accepted():
   logging.info("Terms of service acceptance verified \u2705")
 
 
-async def enable_apis():
+def enable_apis():
   """Enables the required APIs."""
   logging.info("Enabling APIs...")
   # verify_tos_accepted checks the first API, so skip it here.
-  enable_api_calls = map(enable_api, APIS[1:])
-  await asyncio.gather(*enable_api_calls)
+  # Use ThreadPoolExecutor to parallelize the synchronous enable_api calls.
+  with concurrent.futures.ThreadPoolExecutor() as executor:
+    executor.map(enable_api, APIS[1:])
   logging.info("APIs successfully enabled \u2705")
 
 
-async def handle_org_policies():
+def handle_org_policies():
   # pylint: disable=too-many-locals, too-many-branches, too-many-statements
   """Checks and handles organization policies."""
   logging.info("Checking organization policies...")
-  project_id = await get_project_id()
+  project_id = get_project_id()
   policies_to_check = [
       "iam.disableServiceAccountKeyCreation",
       "iam.managed.disableServiceAccountKeyCreation"
@@ -341,8 +343,8 @@ async def handle_org_policies():
   for policy in policies_to_check:
     command = (f"gcloud org-policies describe {policy} "
                f"--project={project_id} --effective")
-    stdout, _, return_code = await retryable_command(command,
-                                                     suppress_errors=True)
+    stdout, _, return_code = retryable_command(command,
+                                               suppress_errors=True)
     if return_code == 0 and "enforce: true" in stdout.decode().lower():
       enforced_policies.append(policy)
   if not enforced_policies:
@@ -351,12 +353,12 @@ async def handle_org_policies():
   logging.warning("The following organization policies are enforced: %s",
                   ", ".join(enforced_policies))
   role_added_by_script = False
-  organization_id = await get_organization_id()
-  admin_user_email = await get_admin_user_email()
+  organization_id = get_organization_id()
+  admin_user_email = get_admin_user_email()
   try:
     command = (f"gcloud organizations get-iam-policy {organization_id} "
                "--format=json")
-    stdout, _, _ = await retryable_command(command, require_output=True)
+    stdout, _, _ = retryable_command(command, require_output=True)
     iam_policy = json.loads(stdout)
     is_org_admin = False
     for binding in iam_policy.get("bindings", []):
@@ -384,7 +386,7 @@ async def handle_org_policies():
               f"{add_iam_policy_binding_command}\n\n"
               "Then, run this script again.\n")
         sys.exit(1)
-      await retryable_command(add_iam_policy_binding_command)
+      retryable_command(add_iam_policy_binding_command)
       role_added_by_script = True
       logging.info(
           "'Org Policy Administrator' role granted successfully. \u2705")
@@ -401,7 +403,7 @@ spec:
         command = (f"gcloud resource-manager org-policies disable-enforce "
                    f"{policy} --project={project_id}")
         stdin_text = None
-      await retryable_command(command, stdin=stdin_text)
+      retryable_command(command, stdin=stdin_text)
       logging.info("Policy %s disabled for project %s. \u2705", policy,
                    project_id)
   finally:
@@ -410,29 +412,29 @@ spec:
           f"gcloud organizations remove-iam-policy-binding {organization_id} "
           f"--member=user:{admin_user_email} "
           "--role=roles/orgpolicy.policyAdmin")
-      await retryable_command(command, suppress_errors=True)
+      retryable_command(command, suppress_errors=True)
       logging.info(
           "'Org Policy Administrator' role removed successfully. \u2705")
 
 
-async def create_service_account():
+def create_service_account():
   """Creates a new service account."""
   logging.info("Creating service account...")
-  service_account_name = f"{TOOL_NAME.lower().replace(' ', '-')}-service-account"
+  service_account_name = f"{TOOL_NAME.lower()}-service-account"
   service_account_display_name = f"{TOOL_NAME} Service Account"
-  await retryable_command(f"gcloud iam service-accounts create "
-                          f"{service_account_name} --display-name "
-                          f'"{service_account_display_name}"')
+  retryable_command(f"gcloud iam service-accounts create "
+                    f"{service_account_name} --display-name "
+                    f'"{service_account_display_name}"')
   logging.info("%s successfully created \u2705", service_account_name)
 
 
-async def create_service_account_key():
+def create_service_account_key():
   """Creates a key for the service account."""
   logging.info("Creating service account key...")
-  service_account_email = await get_service_account_email()
+  service_account_email = get_service_account_email()
   # Allowing for a long set of retries because if the org policies on the
   # project were changed, it could take a while for them to apply.
-  await retryable_command(
+  retryable_command(
       f"gcloud iam service-accounts keys create {KEY_FILE} "
       f"--iam-account={service_account_email}",
       max_num_retries=20,
@@ -440,9 +442,24 @@ async def create_service_account_key():
   logging.info("Service account key successfully created \u2705")
 
 
-async def authorize_service_account():
+def grant_token_creator_role():
+  """Grants the token creator role to the current user."""
+  logging.info("Granting token creator role...")
+  admin_user_email = get_admin_user_email()
+  service_account_email = get_service_account_email()
+  # This permission allows the user to impersonate the service account
+  # to create signed JWTs.
+  retryable_command(
+      f"gcloud iam service-accounts add-iam-policy-binding "
+      f"{service_account_email} "
+      f"--member=user:{admin_user_email} "
+      "--role=roles/iam.serviceAccountTokenCreator")
+  logging.info("Token creator role successfully granted \u2705")
+
+
+def authorize_service_account():
   """Prompts the user to authorize the service account."""
-  service_account_id = await get_service_account_id()
+  service_account_id = get_service_account_id()
   scopes = urllib.parse.quote(",".join(SCOPES), safe="")
   authorize_url = DWD_URL_FORMAT.format(service_account_id, scopes)
   input(f"\n\u2753 Before using {TOOL_NAME_FRIENDLY}, you must authorize the "
@@ -451,16 +468,16 @@ async def authorize_service_account():
         "here and press Enter to continue.")
 
 
-async def verify_service_account_authorization():
+def verify_service_account_authorization():
   """Verifies that the service account is authorized."""
   logging.info("Verifying service account authorization...")
-  admin_user_email = await get_admin_user_email()
-  service_account_id = await get_service_account_id()
+  admin_user_email = get_admin_user_email()
+  service_account_id = get_service_account_id()
   scopes_are_authorized = False
   while not scopes_are_authorized:
     scope_authorization_failures = []
     for scope in SCOPES:
-      scope_authorized = await verify_scope_authorization(
+      scope_authorized = verify_scope_authorization(
           admin_user_email, scope)
       if not scope_authorized:
         scope_authorization_failures.append(scope)
@@ -482,7 +499,7 @@ async def verify_service_account_authorization():
       answer = input(
           "\u2753 "
           "Press Enter to try again, 'c' to continue, or 'n' to cancel: ")
-      if answer.lower == "c":
+      if answer.lower() == "c":
         scopes_are_authorized = True
       if answer.lower() == "n":
         sys.exit(0)
@@ -491,13 +508,13 @@ async def verify_service_account_authorization():
   logging.info("Service account successfully authorized \u2705")
 
 
-async def verify_api_access():
+def verify_api_access():
   """Verifies access to the enabled APIs."""
   # pylint: disable=too-many-locals, too-many-branches, too-many-statements
   logging.info("Verifying API access...")
-  admin_user_email = await get_admin_user_email()
-  project_id = await get_project_id()
-  token = await get_access_token_for_scopes(admin_user_email, SCOPES)
+  admin_user_email = get_admin_user_email()
+  project_id = get_project_id()
+  token = get_access_token_for_scopes(admin_user_email, SCOPES)
   retry_api_verification = True
   while retry_api_verification:
     disabled_apis = {}
@@ -580,30 +597,30 @@ async def verify_api_access():
   logging.info("API access verified \u2705")
 
 
-async def download_service_account_key():
+def download_service_account_key():
   """Downloads the service account key."""
   command = f"cloudshell download {KEY_FILE}"
-  await retryable_command(command)
+  retryable_command(command)
 
 
-async def delete_key():
+def delete_key():
   """Deletes the service account key file."""
   input("\nPress Enter after you have downloaded the file.")
   logging.debug("Deleting key file %s...", KEY_FILE)
   command = f"shred -u {KEY_FILE}"
-  await retryable_command(command)
+  retryable_command(command)
 
 
-async def enable_api(api):
+def enable_api(api):
   """Enables a single API."""
   command = f"gcloud services enable {api}"
-  await retryable_command(command)
+  retryable_command(command)
 
 
-async def verify_scope_authorization(subject, scope):
+def verify_scope_authorization(subject, scope):
   """Verifies authorization for a specific scope."""
   try:
-    await get_access_token_for_scopes(subject, [scope])
+    get_access_token_for_scopes(subject, [scope])
     return True
   except RefreshError:
     logging.debug("Can't get token for scope %s", scope, exc_info=True)
@@ -614,7 +631,7 @@ async def verify_scope_authorization(subject, scope):
     return False
 
 
-async def get_access_token_for_scopes(subject, scopes):
+def get_access_token_for_scopes(subject, scopes):
   """Obtains an access token for the given scopes."""
   logging.debug("Getting access token for scopes %s, user %s", scopes, subject)
   if os.path.exists(KEY_FILE):
@@ -625,14 +642,15 @@ async def get_access_token_for_scopes(subject, scopes):
     delegated_credentials.refresh(request)
     logging.debug("Successfully obtained access token")
     return delegated_credentials.token
-  return await get_access_token_via_gcloud(subject, scopes)
+  return get_access_token_via_gcloud(subject, scopes)
 
 
-async def get_access_token_via_gcloud(subject, scopes):
+def get_access_token_via_gcloud(subject, scopes):
+  # pylint: disable=too-many-locals
   """Obtains an access token using gcloud to sign a JWT."""
   # If no key file exists (e.g. --no-key was used), create a signed JWT
   # using gcloud and exchange it for an access token.
-  service_account_email = await get_service_account_email()
+  service_account_email = get_service_account_email()
   now = int(time.time())
   expiry = now + 3600
   payload = {
@@ -648,9 +666,9 @@ async def get_access_token_via_gcloud(subject, scopes):
     command = ("gcloud iam service-accounts sign-jwt "
                f"--iam-account {service_account_email} "
                "/dev/stdin /dev/stdout")
-    stdout, _, _ = await retryable_command(command,
-                                           stdin=json.dumps(payload),
-                                           require_output=True)
+    stdout, _, _ = retryable_command(command,
+                                     stdin=json.dumps(payload),
+                                     require_output=True)
     signed_jwt = stdout.decode().strip()
     # Exchange the signed JWT for an access token
     http = Http()
@@ -733,26 +751,37 @@ def is_service_disabled(raw_api_response):
   return False
 
 
-async def retryable_command(command,
+def retryable_command(command,
                             max_num_retries=3,
                             retry_delay=5,
                             suppress_errors=False,
                             require_output=False,
                             stdin=None):
+  # pylint: disable=too-many-arguments, too-many-positional-arguments
   """Executes a shell command with retries."""
   num_tries = 1
   while num_tries <= max_num_retries:
     logging.debug("Executing command (attempt %d): %s", num_tries, command)
     if stdin is not None:
       logging.debug("stdin: %s", stdin)
-    process = await asyncio.create_subprocess_shell(
-        command,
-        stdin=asyncio.subprocess.PIPE if stdin else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await process.communicate(
-        input=stdin.encode() if stdin else None)
-    return_code = process.returncode
+
+    try:
+      with subprocess.Popen(
+          command,
+          shell=True,
+          stdin=subprocess.PIPE if stdin else None,
+          stdout=subprocess.PIPE,
+          stderr=subprocess.PIPE) as process:
+        stdout, stderr = process.communicate(
+            input=stdin.encode() if stdin else None)
+        return_code = process.returncode
+    except Exception as e: # pylint: disable=broad-exception-caught
+      logging.error("Subprocess execution failed: %s", e)
+      # Treat as failure
+      stdout = b""
+      stderr = str(e).encode()
+      return_code = 1
+
     logging.debug("stdout: %s", stdout.decode())
     logging.debug("stderr: %s", stderr.decode())
     logging.debug("Return code: %d", return_code)
@@ -761,7 +790,7 @@ async def retryable_command(command,
         return (stdout, stderr, return_code)
     if num_tries < max_num_retries:
       num_tries += 1
-      await asyncio.sleep(retry_delay)
+      time.sleep(retry_delay)
     elif suppress_errors:
       return (stdout, stderr, return_code)
     else:
@@ -773,52 +802,54 @@ async def retryable_command(command,
         logging.critical("Failed to execute command: %s\n\nstderr:\n`%s`",
                          command, stderr.decode())
       sys.exit(return_code)
+  return (stdout, stderr, return_code)
 
 
-async def get_project_id():
+def get_project_id():
   """Gets the current project ID."""
   command = "gcloud config get-value project"
-  project_id, _, _ = await retryable_command(command, require_output=True)
+  project_id, _, _ = retryable_command(command, require_output=True)
   return project_id.decode().rstrip()
 
 
-async def get_service_account_id():
+def get_service_account_id():
   """Gets the service account ID."""
   command = 'gcloud iam service-accounts list --format="value(uniqueId)"'
-  service_account_id, _, _ = await retryable_command(command,
+  service_account_id, _, _ = retryable_command(command,
                                                      require_output=True)
   return service_account_id.decode().rstrip()
 
 
-async def get_service_account_email():
+def get_service_account_email():
   """Gets the service account email."""
   command = 'gcloud iam service-accounts list --format="value(email)"'
-  service_account_email, _, _ = await retryable_command(command,
+  service_account_email, _, _ = retryable_command(command,
                                                         require_output=True)
   return service_account_email.decode().rstrip()
 
 
-async def get_admin_user_email():
+def get_admin_user_email():
   """Gets the admin user email."""
   command = 'gcloud auth list --format="value(account)"'
-  admin_user_email, _, _ = await retryable_command(command, require_output=True)
+  admin_user_email, _, _ = retryable_command(command, require_output=True)
   return admin_user_email.decode().rstrip()
 
 
-async def get_organization_id():
+def get_organization_id():
   """Gets the organization ID."""
   command = 'gcloud organizations list --format="value(ID)"'
-  org_id, _, _ = await retryable_command(command, require_output=True)
+  org_id, _, _ = retryable_command(command, require_output=True)
   return org_id.decode().rstrip()
 
 
 def init_logger(args):
   """Initializes the logger."""
   # Log DEBUG level messages and above to a file
-  logging.basicConfig(filename=f"{TOOL_NAME}_create_service_account.log",
-                      format="[%(asctime)s][%(levelname)s] %(message)s",
-                      datefmt="%FT%TZ",
-                      level=logging.DEBUG)
+  logging.basicConfig(
+      filename=f"{TOOL_NAME}_create_service_account.log",
+      format="[%(asctime)s][%(levelname)s][%(funcName)s:%(lineno)d] %(message)s",
+      datefmt="%FT%TZ",
+      level=logging.DEBUG)
   # Log INFO level messages and above to the console
   console = logging.StreamHandler()
   console.setLevel(logging.INFO)
@@ -830,7 +861,7 @@ def init_logger(args):
     Http.debuglevel = 4
 
 
-async def main():
+def main():
   """Main execution function."""
   args = parse_arguments()
   setup_config(args)
@@ -853,23 +884,25 @@ async def main():
       "\n\nPress Enter to continue or 'n' to exit: ")
   if response.lower() == "n":
     sys.exit(0)
-  await create_project()
-  await verify_tos_accepted()
-  await enable_apis()
+  create_project()
+  verify_tos_accepted()
+  enable_apis()
   if not args.no_key:
-    await handle_org_policies()
-  await create_service_account()
-  await authorize_service_account()
+    handle_org_policies()
+  create_service_account()
+  authorize_service_account()
   if not args.no_key:
-    await create_service_account_key()
-  await verify_service_account_authorization()
-  await verify_api_access()
+    create_service_account_key()
+  else:
+    grant_token_creator_role()
+  verify_service_account_authorization()
+  verify_api_access()
   if not args.no_key:
-    await download_service_account_key()
-    await delete_key()
+    download_service_account_key()
+    delete_key()
   logging.info("Done! \u2705")
   if args.no_key:
-    service_account_email = await get_service_account_email()
+    service_account_email = get_service_account_email()
     print("\nThe service account is correctly authorized. Note the service "
           "account email address, which you can use in "
           f"{TOOL_NAME_FRIENDLY}: \033[1m{service_account_email}\033[0m")
@@ -881,7 +914,7 @@ async def main():
           "resources to which the service account has access. You should treat "
           "it just like you would a password.")
   if TOOL_NAME == "GWM":
-    project_id = await get_project_id()
+    project_id = get_project_id()
     print("\nNext, follow the instructions to create the OAuth web client "
           f"ID for project {project_id}. You can create this by going to "
           f"{OAUTH_CONSENT_SCREEN_URL_FORMAT.format(project_id)}. The "
@@ -890,4 +923,4 @@ async def main():
 
 
 if __name__ == "__main__":
-  asyncio.run(main())
+  main()

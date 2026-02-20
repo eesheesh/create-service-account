@@ -3,9 +3,8 @@ import unittest
 import sys
 import os
 import argparse
-import asyncio
 import re
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, Mock
 
 # Add parent directory to sys.path to import create_service_account
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -139,10 +138,10 @@ class TestCreateServiceAccount(unittest.TestCase):
     create_service_account.setup_config(args)
     self.assertEqual(create_service_account.TOOL_NAME, "Good-Name-123")
 
-  @patch('create_service_account.retryable_command', new_callable=AsyncMock)
+  @patch('create_service_account.retryable_command', new_callable=Mock)
   def test_project_name_truncation(self, mock_retryable):
     create_service_account.TOOL_NAME = "ThisIsAVeryLongToolNameThatExceedsLimit"
-    asyncio.run(create_service_account.create_project())
+    create_service_account.create_project()
 
     # Check the command passed to retryable_command
     call_args = mock_retryable.call_args[0][0]
@@ -164,10 +163,10 @@ class TestCreateServiceAccount(unittest.TestCase):
     # Project ID lowercased
     self.assertTrue(project_id.startswith("thisisaverylon-"))
 
-  @patch('create_service_account.retryable_command', new_callable=AsyncMock)
+  @patch('create_service_account.retryable_command', new_callable=Mock)
   def test_project_name_starts_with_letter(self, mock_retryable):
     create_service_account.TOOL_NAME = "123Tool"
-    asyncio.run(create_service_account.create_project())
+    create_service_account.create_project()
 
     # Check the command passed to retryable_command
     call_args = mock_retryable.call_args[0][0]
@@ -206,9 +205,9 @@ class TestCreateServiceAccount(unittest.TestCase):
       self.assertEqual(create_service_account.Http.debuglevel, 4)
 
   @patch('create_service_account.get_service_account_email',
-         new_callable=AsyncMock)
+         new_callable=Mock)
   @patch('create_service_account.retryable_command',
-         new_callable=AsyncMock)
+         new_callable=Mock)
   @patch('create_service_account.Http.request')
   @patch('create_service_account.os.path.exists')
   def test_get_access_token_no_key(self, mock_exists, mock_request,
@@ -217,16 +216,15 @@ class TestCreateServiceAccount(unittest.TestCase):
     mock_exists.return_value = False  # KEY_FILE does not exist
     create_service_account.KEY_FILE = "dummy_key.json"
     create_service_account.TOOL_NAME = "TestTool"
-    # Mock get_service_account_email (async)
+    # Mock get_service_account_email (sync)
     mock_get_email.return_value = "tool-service-account@test-project.iam.gserviceaccount.com"
-    # Mock retryable_command (async)
+    # Mock retryable_command (sync)
     mock_retryable.return_value = (b"signed_jwt_content", b"", 0)
     # Mock Http request for token exchange
     mock_request.return_value = (unittest.mock.Mock(status=200),
                                  b'{"access_token": "mock_access_token"}')
-    token = asyncio.run(
-        create_service_account.get_access_token_for_scopes(
-            "user@example.com", ["scope1"]))
+    token = create_service_account.get_access_token_for_scopes(
+            "user@example.com", ["scope1"])
     self.assertEqual(token, "mock_access_token")
 
 if __name__ == '__main__':

@@ -1,6 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, AsyncMock, call
-import asyncio
+from unittest.mock import patch, MagicMock, call
 import sys
 import os
 import json
@@ -26,8 +25,8 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_input = self.patcher_input.start()
 
         # Patch print/stdout to capture output
-        self.patcher_stdout = patch('sys.stdout', new_callable=MagicMock)
-        self.mock_stdout = self.patcher_stdout.start()
+        # self.patcher_stdout = patch('sys.stdout', new_callable=MagicMock)
+        # self.mock_stdout = self.patcher_stdout.start()
 
         # Patch logging to suppress output during tests but allow capture if needed
         self.patcher_logging = patch('create_service_account.logging')
@@ -37,9 +36,9 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.patcher_os_system = patch('os.system')
         self.mock_os_system = self.patcher_os_system.start()
 
-        # Patch asyncio.create_subprocess_shell
-        self.patcher_subprocess = patch('asyncio.create_subprocess_shell', new_callable=AsyncMock)
-        self.mock_subprocess = self.patcher_subprocess.start()
+        # Patch subprocess.Popen (synchronous)
+        self.patcher_subprocess = patch('subprocess.Popen', new_callable=MagicMock)
+        self.mock_subprocess_popen = self.patcher_subprocess.start()
 
         # Patch httplib2.Http
         self.patcher_http = patch('create_service_account.Http')
@@ -68,8 +67,8 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.patcher_home = patch('pathlib.Path.home', return_value='/home/user')
         self.mock_home = self.patcher_home.start()
 
-        # Patch time.sleep to speed up tests
-        self.patcher_sleep = patch('asyncio.sleep', new_callable=AsyncMock)
+        # Patch time.sleep to speed up tests (synchronous)
+        self.patcher_sleep = patch('time.sleep', new_callable=MagicMock)
         self.mock_sleep = self.patcher_sleep.start()
 
         # Patch datetime to control timestamp for project name
@@ -94,14 +93,15 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.patcher_subprocess.stop()
         self.patcher_os_system.stop()
         self.patcher_logging.stop()
-        self.patcher_stdout.stop()
+        # self.patcher_stdout.stop()
         self.patcher_input.stop()
 
     def _setup_subprocess_mock(self):
         # Default behavior for subprocess mock
-        async def side_effect(command, stdin=None, stdout=None, stderr=None):
+        def side_effect(command, **kwargs):
             process_mock = MagicMock()
             process_mock.returncode = 0
+            process_mock.__enter__.return_value = process_mock
 
             # Default outputs
             out = b''
@@ -127,10 +127,10 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
             elif "sign-jwt" in command:
                 out = b'signed-jwt-token\n'
 
-            process_mock.communicate = AsyncMock(return_value=(out, err))
+            process_mock.communicate.return_value = (out, err)
             return process_mock
 
-        self.mock_subprocess.side_effect = side_effect
+        self.mock_subprocess_popen.side_effect = side_effect
 
     def _setup_http_mock(self):
         def side_effect(url, method, body=None, headers=None):
@@ -167,7 +167,7 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self._setup_http_mock()
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'gwm']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         # Verify gwm configuration
         self.assertEqual(create_service_account.TOOL_NAME, "GWM")
@@ -182,31 +182,31 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
 
         expected_cmd = f"gcloud projects create {project_id} --name '{project_name}' --set-as-default"
 
-        self.assertTrue(any(expected_cmd in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any(expected_cmd in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Verify specific GWM calls
         # APIs enabled?
-        enable_calls = [call for call in self.mock_subprocess.call_args_list if "gcloud services enable" in call[0][0]]
+        enable_calls = [call for call in self.mock_subprocess_popen.call_args_list if "gcloud services enable" in call[0][0]]
         self.assertTrue(len(enable_calls) > 0)
 
         # Service Account created?
-        self.assertTrue(any("gcloud iam service-accounts create" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Key created?
-        self.assertTrue(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Downloaded?
-        self.assertTrue(any("cloudshell download" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("cloudshell download" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Shredded?
-        self.assertTrue(any("shred -u" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("shred -u" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
     def test_run_gwmme(self):
         self._setup_subprocess_mock()
         self._setup_http_mock()
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'gwmme']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
         self.assertIn("groupsmigration.googleapis.com", create_service_account.APIS)
@@ -219,7 +219,7 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self._setup_http_mock()
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'password_sync']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         self.assertEqual(create_service_account.TOOL_NAME, "PasswordSync")
         self.assertEqual(create_service_account.APIS, ["admin.googleapis.com", "orgpolicy.googleapis.com"])
@@ -235,7 +235,7 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
                 '--scopes', 'https://www.googleapis.com/auth/drive,calendar']
 
         with patch('sys.argv', args):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         self.assertEqual(create_service_account.TOOL_NAME, "CustomTool")
         self.assertIn("drive.googleapis.com", create_service_account.APIS)
@@ -257,7 +257,7 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_input.side_effect = itertools.chain(['', '1'], itertools.repeat(''))
 
         with patch('sys.argv', ['create_service_account.py']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         self.assertEqual(create_service_account.TOOL_NAME, "GWMME")
         self.assertIn("admin.googleapis.com", create_service_account.APIS)
@@ -269,22 +269,25 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_exists.return_value = False
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'gwm', '--no-key']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         # Verify key file creation skipped
-        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
         # Verify download skipped
-        self.assertFalse(any("cloudshell download" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("cloudshell download" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
         # Verify shred skipped
-        self.assertFalse(any("shred -u" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("shred -u" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Verify sign-jwt used
-        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
         # Verify orgpolicy check skipped (default not in list for no-key unless added?)
         # Logic says: if not no_key: handle_org_policies()
         # So org-policies calls should be missing
-        self.assertFalse(any("gcloud org-policies describe" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("gcloud org-policies describe" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+
+        # Verify token creator role granted
+        self.assertTrue(any("gcloud iam service-accounts add-iam-policy-binding" in call[0][0] and "roles/iam.serviceAccountTokenCreator" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
     def test_run_gwmme_no_key(self):
         self._setup_subprocess_mock()
@@ -292,10 +295,11 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_exists.return_value = False
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'gwmme', '--no-key']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
-        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess.call_args_list))
-        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts add-iam-policy-binding" in call[0][0] and "roles/iam.serviceAccountTokenCreator" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
     def test_run_password_sync_no_key(self):
         self._setup_subprocess_mock()
@@ -303,10 +307,11 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_exists.return_value = False
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'password_sync', '--no-key']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
-        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess.call_args_list))
-        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts add-iam-policy-binding" in call[0][0] and "roles/iam.serviceAccountTokenCreator" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
     def test_run_custom_tool_no_key(self):
         self._setup_subprocess_mock()
@@ -320,16 +325,18 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
                 '--no-key']
 
         with patch('sys.argv', args):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
-        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess.call_args_list))
-        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertFalse(any("gcloud iam service-accounts keys create" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts sign-jwt" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
+        self.assertTrue(any("gcloud iam service-accounts add-iam-policy-binding" in call[0][0] and "roles/iam.serviceAccountTokenCreator" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
     def test_enforced_org_policy(self):
         # Specific test where org policy is enforced
-        async def side_effect(command, stdin=None, stdout=None, stderr=None):
+        def side_effect(command, **kwargs):
             process_mock = MagicMock()
             process_mock.returncode = 0
+            process_mock.__enter__.return_value = process_mock
             out = b''
             err = b''
 
@@ -353,10 +360,10 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
             elif "gcloud organizations list" in command:
                 out = b'123456789\n'
 
-            process_mock.communicate = AsyncMock(return_value=(out, err))
+            process_mock.communicate.return_value = (out, err)
             return process_mock
 
-        self.mock_subprocess.side_effect = side_effect
+        self.mock_subprocess_popen.side_effect = side_effect
         self._setup_http_mock()
 
         # Need to simulate "Yes" input for granting role
@@ -370,14 +377,14 @@ class TestCreateServiceAccountIntegration(unittest.TestCase):
         self.mock_input.side_effect = ['', 'y', '', '', '', '']
 
         with patch('sys.argv', ['create_service_account.py', '--tool', 'gwm']):
-            asyncio.run(create_service_account.main())
+            create_service_account.main()
 
         # Verify role was added
-        self.assertTrue(any("gcloud organizations add-iam-policy-binding" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud organizations add-iam-policy-binding" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
         # Verify policy was disabled
-        self.assertTrue(any("gcloud resource-manager org-policies disable-enforce iam.disableServiceAccountKeyCreation" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud resource-manager org-policies disable-enforce iam.disableServiceAccountKeyCreation" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
         # Verify role was removed
-        self.assertTrue(any("gcloud organizations remove-iam-policy-binding" in call[0][0] for call in self.mock_subprocess.call_args_list))
+        self.assertTrue(any("gcloud organizations remove-iam-policy-binding" in call[0][0] for call in self.mock_subprocess_popen.call_args_list))
 
 if __name__ == '__main__':
     unittest.main()
