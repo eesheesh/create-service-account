@@ -18,23 +18,22 @@ limitations under the License.
 
 These scripts are designed to automate the steps needed to create a service account for use with Google Workspace migration & sync products. They are meant to be executed within a Google Cloud Shell. The scripts generate a service account's private key JSON file which can then be provided to the migration or sync tool. The scripts automate the following:
 
-*   Creates a GCP project
-*   Enables APIs
-*   Creates a service account
-*   Authorizes the service account
-*   Creates and downloads a service account key
+* Creates a GCP project
+* Enables APIs
+* Creates a service account
+* Authorizes the service account
+* Creates and downloads a service account key
 
-Table of contents
-=================
+## Table of contents
 
-   * [Getting Started](#getting-started)
-   * [Usage](#usage)
-      * [Google Workspace Migrate (GWM)](#google-workspace-migrate-gwm)
-      * [Google Workspace Migration for Microsoft Exchange (GWMME)](#google-workspace-migration-for-microsoft-exchange-gwmme)
-      * [Password Sync](#password-sync)
-   * [Help](#help)
-      * [Bugs and Feature Requests](#bugs-and-feature-requests)
-      * [Alternatives](#alternatives)
+* [Getting Started](#getting-started)
+* [Usage](#usage)
+  * [Google Workspace Migrate (GWM)](#google-workspace-migrate-gwm)
+  * [Google Workspace Migration for Microsoft Exchange (GWMME)](#google-workspace-migration-for-microsoft-exchange-gwmme)
+  * [Password Sync](#password-sync)
+* [Help](#help)
+  * [Bugs and Feature Requests](#bugs-and-feature-requests)
+  * [Alternatives](#alternatives)
 
 ## Getting Started
 
@@ -42,9 +41,9 @@ In order to run these scripts, you must be a Google Workspace Super
 Administrator. The script that you execute will depend on which tool you are
 using. To get started, first select the tool that you are planning to use.
 
-*   [Google Workspace Migration for Microsoft Exchange (GWMME)](#google-workspace-migration-for-microsoft-exchange-gwmme)
-*   [Google Workspace Migrate (GWM)](#google-workspace-migrate-gwm)
-*   [Password Sync](#password-sync)
+* [Google Workspace Migration for Microsoft Exchange (GWMME)](#google-workspace-migration-for-microsoft-exchange-gwmme)
+* [Google Workspace Migrate (GWM)](#google-workspace-migrate-gwm)
+* [Password Sync](#password-sync)
 
 ## Usage
 
@@ -53,10 +52,10 @@ using. To get started, first select the tool that you are planning to use.
 To create an authorized service account for Google Workspace Migration for
 Microsoft Exchange, copy and paste the command below in Cloud Shell.
 
-1.  [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
-2.  Copy and paste the following command into Cloud Shell and press Enter.
+1. [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
+2. Copy and paste the following command into Cloud Shell and press Enter.
 
-```
+```bash
 python3 <(curl -s -S -L https://git.io/gwmme-create-service-account)
 ```
 
@@ -65,10 +64,10 @@ python3 <(curl -s -S -L https://git.io/gwmme-create-service-account)
 To create an authorized service account for Google Workspace Migration, copy and
 paste the command below in Cloud Shell.
 
-1.  [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
-2.  Copy and paste the following command into Cloud Shell and press Enter.
+1. [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
+2. Copy and paste the following command into Cloud Shell and press Enter.
 
-```
+```bash
 python3 <(curl -s -S -L https://git.io/gwm-create-service-account)
 ```
 
@@ -77,10 +76,10 @@ python3 <(curl -s -S -L https://git.io/gwm-create-service-account)
 To create an authorized service account for Password Sync, copy and paste the
 command below in Cloud Shell.
 
-1.  [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
-2.  Copy and paste the following command into Cloud Shell and press Enter.
+1. [Open Cloud Shell](https://ssh.cloud.google.com/cloudshell/editor?shellonly=true)
+2. Copy and paste the following command into Cloud Shell and press Enter.
 
-```
+```bash
 python3 <(curl -s -S -L https://git.io/password-sync-create-service-account)
 ```
 
@@ -100,4 +99,3 @@ If these scripts are not working for you, then you can use the manual steps inst
 --------------------------------------------------------------------------------
 
 *This is not an officially supported Google product.*
-
